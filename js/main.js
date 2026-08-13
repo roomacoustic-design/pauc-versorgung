@@ -44,9 +44,8 @@ const state = {
   planStunden: 10,         // geplante Stunden unterwegs (inkl. Stehzeit)
   tage: [],                // abgeschlossene Tourtage {d, endKm, stunden, tempo, steh}
   filter: "alles",
-  tab: "versorgung",       // versorgung | betten (Betten: 1x am Tag, eigener Tab)
-  horizontKm: 50,
-  horizontBettenKm: 100,
+  tab: "versorgung",       // versorgung | betten | karte
+  anzahl: { versorgung: 20, betten: 20 }, // sichtbare Listeneinträge je Tab
   wakeLock: null,
 };
 
@@ -61,7 +60,7 @@ function speichern() {
       km: state.km,
       speedMode: state.speedMode, manualKmh: state.manualKmh, filter: state.filter,
       stehMin: state.stehMin, ermuedung: state.ermuedung, planStunden: state.planStunden,
-      tab: state.tab,
+      tab: state.tab, anzahl: state.anzahl,
     }));
     localStorage.setItem("versorgung-tage", JSON.stringify(state.tage));
   } catch { /* Speicher voll o. ä. — nicht kritisch */ }
@@ -81,6 +80,12 @@ function laden() {
     if (["alles", "essen", "laeden", "wasser"].includes(s.filter)) state.filter = s.filter;
     else if (s.filter === "schlafen") { state.filter = "alles"; state.tab = "betten"; } // Migration
     if (["versorgung", "betten", "karte"].includes(s.tab)) state.tab = s.tab;
+    if (s.anzahl && Number.isFinite(s.anzahl.versorgung) && Number.isFinite(s.anzahl.betten)) {
+      state.anzahl = {
+        versorgung: Math.max(20, Math.floor(s.anzahl.versorgung)),
+        betten: Math.max(20, Math.floor(s.anzahl.betten)),
+      };
+    }
     if (Number.isFinite(s.stehMin)) state.stehMin = Math.min(30, Math.max(0, s.stehMin));
     if (Number.isFinite(s.ermuedung)) state.ermuedung = Math.min(20, Math.max(0, s.ermuedung));
     if (Number.isFinite(s.planStunden)) state.planStunden = Math.min(18, Math.max(2, s.planStunden));
@@ -197,6 +202,19 @@ function render() {
     </button>`;
   }
 
+  // Abseits der Route: erklären, worauf sich alle Angaben beziehen —
+  // sonst sieht "McDonald's in 1,0 km" hunderte km neben der Route absurd aus.
+  if (state.posMode === "gps" && state.offRoute && state.distRoute) {
+    const d = state.distRoute;
+    const dText = d >= 2000 ? `${nf1.format(d / 1000)} km` : `${nf0.format(d)} m`;
+    warnHtml += `<div class="card warnung">
+      <div class="titel">⚠ Abseits der Route</div>
+      <div class="neben">Du bist ~${dText} vom nächsten Routenpunkt entfernt (km ${km1(state.km)}).
+        Alle Distanzen und Zeiten beziehen sich auf die Route ab dort.</div>
+      ${d >= 2000 ? `<div class="neben dim-text">Zum Planen: Position antippen → „manuell" → km setzen.</div>` : ""}
+    </div>`;
+  }
+
   // Lückenwarnung
   const luecke = findeLuecke(t.pois, t.meta.laenge_km, state.km, LUECKE_KM,
     { track: t.track, nowMs: now, vKmh: v, fenster });
@@ -276,12 +294,14 @@ function render() {
 
   // POI-Liste (Versorgung) bzw. Unterkünfte (Betten-Tab)
   const set = FILTER_SETS[state.filter];
-  const horizont = betten ? state.horizontBettenKm : state.horizontKm;
+  const horizont = betten ? 150 : 100; // km Blickweite; die Anzahl begrenzt die Zeilen
   const voraus = t.pois.filter((p) =>
     p.km > state.km - 0.3 && p.km <= state.km + horizont
     && (betten ? p.typ === "Unterkunft"
       : p.typ !== "Unterkunft" && (!set || set.has(p.typ))));
-  const eintraege = gruppiere(voraus).slice(0, 400);
+  const alleEintraege = gruppiere(voraus);
+  const anzahl = betten ? state.anzahl.betten : state.anzahl.versorgung;
+  const eintraege = alleEintraege.slice(0, anzahl);
   const rows = eintraege.map((e) => {
     if (e.gruppe) {
       const p = e.gruppe[0];
@@ -320,7 +340,10 @@ function render() {
   });
   $("poi-list").innerHTML = rows.join("")
     || `<div class="leer">${betten ? "Keine Unterkünfte" : "Nichts"} in den nächsten ${nf0.format(horizont)} km.</div>`;
-  $("more-btn").textContent = `weiter voraus zeigen (${nf0.format(horizont)} → ${nf0.format(horizont + 50)} km)`;
+  $("more-btn").hidden = karteTab || eintraege.length >= alleEintraege.length;
+  $("more-btn").textContent = `20 weitere zeigen (${Math.min(anzahl, alleEintraege.length)} von ${alleEintraege.length})`;
+  $("less-btn").hidden = karteTab || anzahl <= 20;
+  $("less-btn").textContent = "nur die nächsten 20 zeigen";
 
   // Höhenmeter voraus
   const c = naechsterClimb(t.climbs, state.km);
@@ -591,22 +614,58 @@ function bauKarte() {
   karteGroessen();
   karteViewBox();
 
-  // Pan per Finger/Maus (ein Zeiger reicht am Lenker), Zoom über Knöpfe
-  let drag = null;
+  // Multi-Pointer: 1 Finger = Pan, 2 Finger = Pinch-Zoom um den Mittelpunkt.
+  // (Vorher wurden zwei Finger als zwei konkurrierende Pan-Gesten verarbeitet
+  // — daher das Springen auf dem iPhone.)
+  // Welt-pro-Pixel unter preserveAspectRatio "xMidYMid meet":
+  const weltProPixel = () => Math.max(
+    karte.view.w / svg.clientWidth, karte.view.h / svg.clientHeight);
+  const zeiger = new Map();
+  let pinch = null;
   svg.addEventListener("pointerdown", (e) => {
-    drag = { x: e.clientX, y: e.clientY };
-    svg.setPointerCapture(e.pointerId);
+    zeiger.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    try { svg.setPointerCapture(e.pointerId); } catch { /* synthetisch/inaktiv */ }
+    if (zeiger.size === 2) {
+      const [a, b] = [...zeiger.values()];
+      pinch = { dist: Math.hypot(a.x - b.x, a.y - b.y), view: { ...karte.view } };
+    }
   });
   svg.addEventListener("pointermove", (e) => {
-    if (!drag) return;
-    const skala = karte.view.w / svg.clientWidth;
-    karte.view.x -= (e.clientX - drag.x) * skala;
-    karte.view.y -= (e.clientY - drag.y) * skala;
-    drag = { x: e.clientX, y: e.clientY };
-    karteViewBox();
+    if (!zeiger.has(e.pointerId)) return;
+    const alt = zeiger.get(e.pointerId);
+    zeiger.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    if (zeiger.size === 1 && !pinch) {
+      const wpp = weltProPixel();
+      karte.view.x -= (e.clientX - alt.x) * wpp;
+      karte.view.y -= (e.clientY - alt.y) * wpp;
+      karteViewBox();
+    } else if (zeiger.size === 2 && pinch) {
+      const [a, b] = [...zeiger.values()];
+      const distanz = Math.hypot(a.x - b.x, a.y - b.y);
+      if (distanz < 10) return;
+      const faktor = Math.max(0.15, Math.min(6, pinch.dist / distanz));
+      const sv = pinch.view;
+      const rect = svg.getBoundingClientRect();
+      const wpp0 = Math.max(sv.w / rect.width, sv.h / rect.height);
+      // Welt-Koordinate unter dem Finger-Mittelpunkt festnageln
+      const mx = (a.x + b.x) / 2 - rect.left, my = (a.y + b.y) / 2 - rect.top;
+      const wx = sv.x + sv.w / 2 + (mx - rect.width / 2) * wpp0;
+      const wy = sv.y + sv.h / 2 + (my - rect.height / 2) * wpp0;
+      const neuW = Math.min(sv.w * faktor, karte.initial.w * 1.5);
+      const f2 = neuW / sv.w;
+      const wpp1 = wpp0 * f2;
+      const cx = wx - (mx - rect.width / 2) * wpp1;
+      const cy = wy - (my - rect.height / 2) * wpp1;
+      karte.view = { x: cx - neuW / 2, y: cy - sv.h * f2 / 2, w: neuW, h: sv.h * f2 };
+      karteViewBox();
+    }
   });
-  svg.addEventListener("pointerup", () => { drag = null; });
-  svg.addEventListener("pointercancel", () => { drag = null; });
+  const zeigerWeg = (e) => {
+    zeiger.delete(e.pointerId);
+    if (zeiger.size < 2 && pinch) { pinch = null; karteGroessen(); }
+  };
+  svg.addEventListener("pointerup", zeigerWeg);
+  svg.addEventListener("pointercancel", zeigerWeg);
 
   $("karte-tools").addEventListener("click", (e) => {
     const b = e.target.closest("button");
@@ -824,6 +883,7 @@ function onFix(fix) {
   const m = matchPosition(state.tour.track, state.matchIdx, fix.coords.latitude, fix.coords.longitude);
   state.matchIdx = m.idx;
   state.offRoute = m.offRoute;
+  state.distRoute = m.distM;
   if (state.posMode === "gps") state.km = m.km;
   speichern();
   render();
@@ -896,10 +956,15 @@ async function boot() {
   $("plan-btn").addEventListener("click", zeigePlan);
   $("speed-btn").addEventListener("click", zeigeGeschwindigkeit);
   $("wake-btn").addEventListener("click", toggleWakeLock);
+  const tabKey = () => (state.tab === "betten" ? "betten" : "versorgung");
   $("more-btn").addEventListener("click", () => {
-    if (state.tab === "betten") state.horizontBettenKm += 50;
-    else state.horizontKm += 50;
-    render();
+    state.anzahl[tabKey()] += 20;
+    speichern(); render();
+  });
+  $("less-btn").addEventListener("click", () => {
+    state.anzahl[tabKey()] = 20;
+    speichern(); render();
+    $("poi-list").scrollIntoView({ block: "start" });
   });
   document.querySelectorAll("#tabs .tab").forEach((b) => {
     b.addEventListener("click", () => { state.tab = b.dataset.tab; speichern(); render(); });
