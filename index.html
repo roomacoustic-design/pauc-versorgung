@@ -1,0 +1,57 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
+  <title>Versorgung</title>
+  <meta name="theme-color" content="#0b1220">
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="apple-touch-icon" href="icons/icon-180.png">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="Versorgung">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header id="topbar">
+    <button id="pos-btn" class="stat" aria-label="Position einstellen">
+      <span class="val"><span id="pos-km">–</span><small> km</small></span>
+      <span class="sub" id="pos-mode">GPS aus</span>
+    </button>
+    <button id="speed-btn" class="stat" aria-label="Geschwindigkeit einstellen">
+      <span class="val"><span id="speed-val">–</span><small> km/h</small></span>
+      <span class="sub" id="speed-mode">auto</span>
+    </button>
+    <div class="stat">
+      <span class="val" id="clock">–</span>
+      <span class="sub" id="gps-status">…</span>
+    </div>
+    <button id="wake-btn" aria-label="Display anlassen">☀</button>
+  </header>
+
+  <main>
+    <section id="warn"></section>
+    <section id="dayend"></section>
+
+    <nav id="filters">
+      <button data-f="alles" class="chip active">Alles</button>
+      <button data-f="essen" class="chip">Essen</button>
+      <button data-f="laeden" class="chip">Läden</button>
+      <button data-f="wasser" class="chip">Wasser</button>
+    </nav>
+
+    <section id="poi-list"></section>
+    <button id="more-btn" class="ghost">weiter voraus zeigen</button>
+
+    <section id="climb-info"></section>
+
+    <footer id="attrib"></footer>
+  </main>
+
+  <div id="modal-backdrop" hidden>
+    <div id="modal" role="dialog"></div>
+  </div>
+
+  <script type="module" src="js/main.js"></script>
+</body>
+</html>
