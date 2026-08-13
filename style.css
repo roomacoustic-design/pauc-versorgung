@@ -56,7 +56,7 @@ body {
 button.stat:active { background: var(--card2); }
 .stat .val { font-size: 26px; font-weight: 700; font-variant-numeric: tabular-nums; }
 .stat .val small { font-size: 14px; font-weight: 500; color: var(--dim); }
-.stat .sub { font-size: 12px; color: var(--dim); }
+.stat .sub { font-size: 13px; color: var(--dim); }
 .stat .sub.warnend { color: var(--knapp); font-weight: 600; }
 #wake-btn {
   width: 52px; border: 1px solid var(--line); border-radius: 12px;
@@ -104,10 +104,10 @@ main { padding: 10px 10px 30px; max-width: 640px; margin: 0 auto; }
   font-size: 18px; font-weight: 700;
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
-.poi .status { font-size: 15px; margin-top: 2px; }
+.poi .status { font-size: 16px; margin-top: 2px; }
 .poi .rechts { text-align: right; flex-shrink: 0; }
 .poi .dist { font-size: 19px; font-weight: 700; font-variant-numeric: tabular-nums; }
-.poi .eta { font-size: 14px; color: var(--dim); font-variant-numeric: tabular-nums; }
+.poi .eta { font-size: 15px; color: var(--dim); font-variant-numeric: tabular-nums; }
 .poi.bonus { opacity: .75; }
 
 .s-offen { color: var(--offen); }
@@ -127,7 +127,7 @@ main { padding: 10px 10px 30px; max-width: 640px; margin: 0 auto; }
 #climb-info .zeile { display: flex; justify-content: space-between; font-size: 16px; padding: 3px 0; }
 #climb-info .zeile b { font-variant-numeric: tabular-nums; }
 
-#attrib { color: #556279; font-size: 12px; text-align: center; margin-top: 18px; line-height: 1.5; }
+#attrib { color: #7c8ba1; font-size: 12px; text-align: center; margin-top: 18px; line-height: 1.5; }
 
 /* Modal */
 #modal-backdrop {
@@ -178,3 +178,6 @@ main { padding: 10px 10px 30px; max-width: 640px; margin: 0 auto; }
   flex: 1; padding: 12px 0; font-size: 17px; font-weight: 700; font-family: inherit;
   background: var(--card); color: var(--text); border: 1px solid var(--line); border-radius: 12px;
 }
+
+/* Zwei-Quellen-Anzeige im POI-Detail */
+.quelle-titel { font-size: 13px; font-weight: 700; color: var(--accent); }

@@ -1,6 +1,6 @@
 import {
   ANKER_TYPEN, ESSEN_TYPEN, LAEDEN_TYPEN, WASSER_TYPEN, LUECKE_KM,
-  matchPosition, hmZwischen, naechsterClimb, autoSchnitt, fixAkzeptieren,
+  matchPosition, hmZwischen, naechsterClimb, fixAkzeptieren,
   fahrzeitMin, etaMs,
   statusZu, istAnker, findeLuecke, letzteVersorgungVorLuecke, letzterPunktDesTages,
 } from "./logic.js";
@@ -25,7 +25,6 @@ const ICONS = {
   "Checkpoint": "📍",
 };
 const FILTER_SETS = { essen: ESSEN_TYPEN, laeden: LAEDEN_TYPEN, wasser: WASSER_TYPEN };
-const DEFAULT_KMH = 18;
 
 const state = {
   tour: null,
@@ -36,8 +35,7 @@ const state = {
   offRoute: false,
   gpsStatus: "aus",        // aus | warte | ok | fehler
   lastFixT: 0,
-  samples: [],             // {t, km} für Bewegungsschnitt
-  speedMode: "auto",       // auto | manuell | konservativ
+  speedMode: "manuell",    // manuell | konservativ (kein Auto-Tracking, Wunsch Max)
   manualKmh: 20,
   filter: "alles",
   horizontKm: 50,
@@ -66,7 +64,8 @@ function laden() {
     if (Number.isFinite(s.manualKm)) state.manualKm = Math.max(0, s.manualKm);
     if (Number.isFinite(s.matchIdx) && s.matchIdx >= 0) state.matchIdx = Math.floor(s.matchIdx);
     if (Number.isFinite(s.km)) state.km = Math.max(0, s.km); // letzter Stand bis zum ersten Fix
-    if (["auto", "manuell", "konservativ"].includes(s.speedMode)) state.speedMode = s.speedMode;
+    if (["manuell", "konservativ"].includes(s.speedMode)) state.speedMode = s.speedMode;
+    else if (s.speedMode === "auto") state.speedMode = "manuell"; // Migration alter Stände
     if (Number.isFinite(s.manualKmh)) state.manualKmh = Math.min(45, Math.max(5, s.manualKmh));
     if (["alles", "essen", "laeden", "wasser"].includes(s.filter)) state.filter = s.filter;
   } catch { /* egal */ }
@@ -95,12 +94,10 @@ function esc(s) {
 // --- Geschwindigkeit ---------------------------------------------------------------
 
 function effektiverSchnitt() {
-  const auto = autoSchnitt(state.samples, Date.now());
-  if (state.speedMode === "manuell") return { v: state.manualKmh, quelle: "manuell" };
   if (state.speedMode === "konservativ") {
-    return { v: (auto ?? DEFAULT_KMH) * 0.8, quelle: auto ? "konservativ" : "konservativ*" };
+    return { v: state.manualKmh * 0.8, quelle: "konservativ" };
   }
-  return auto ? { v: auto, quelle: "auto" } : { v: DEFAULT_KMH, quelle: "Annahme" };
+  return { v: state.manualKmh, quelle: "manuell" };
 }
 
 // --- Statuszeile pro POI ---------------------------------------------------------------
@@ -209,7 +206,7 @@ function render() {
   if (letzterHeute) {
     const p = letzterHeute.poi;
     $("dayend").innerHTML = `<button class="card poi-open" data-id="${p.id}" style="width:100%;text-align:left;font:inherit;color:inherit">
-      <div class="titel">🌙 Heute noch erreichbar (letzter Laden)</div>
+      <div class="titel">🌙 Heute noch erreichbar</div>
       <div class="neben"><b>${ICONS[p.typ] || ""} ${esc(p.name)}</b> · km ${km1(p.km)} · in ${km1(Math.max(0, p.km - state.km))} km</div>
       <div class="neben">Ankunft ~${uhr(letzterHeute.eta)} · <span class="s-offen">offen ${bisText(letzterHeute.status.bis, now)}</span></div>
     </button>`;
@@ -264,10 +261,10 @@ function render() {
 
 // --- POI-Detail ---------------------------------------------------------------
 
-function tagesZeilen(oz, refMs) {
-  if (!oz?.intervalle?.length) return "";
+function tagesZeilen(intervalle, refMs) {
+  if (!intervalle?.length) return "";
   const proTag = new Map();
-  for (const [von, bis, unbekannt] of oz.intervalle) {
+  for (const [von, bis, unbekannt] of intervalle) {
     const d = new Date(von);
     const key = `${WOCHENTAGE[d.getDay()]} ${d.getDate()}.${d.getMonth() + 1}.`;
     if (!proTag.has(key)) proTag.set(key, []);
@@ -305,13 +302,16 @@ function zeigePoi(id) {
       <div class="label">Ankunft</div>
       <div class="wert">in ${km1(Math.max(0, p.km - state.km))} km (+${nf0.format(hm)} hm) · ~${uhrMitTag(eta, now)}<br>${stText}</div>
     </div>
-    ${oz?.intervalle ? `<div class="block"><div class="label">Zeiten während der Tour (Stand ${t.meta.zeiten_snapshot})</div>
-      <div class="wert">${tagesZeilen(oz, now)}</div></div>` : ""}
+    ${oz?.widerspruch ? `<div class="block"><div class="label">⚠ Google und OSM widersprechen sich — Stand ${t.meta.zeiten_snapshot}</div>
+      <div class="wert"><div class="quelle-titel">Google (für Ampel verwendet)</div>${tagesZeilen(oz.intervalle_google, now)}
+      <div class="quelle-titel" style="margin-top:10px">OpenStreetMap</div>${tagesZeilen(oz.intervalle_osm, now)}</div></div>`
+    : oz?.intervalle ? `<div class="block"><div class="label">Zeiten während der Tour · Quelle: ${oz.quelle_bevorzugt === "google" ? "Google" : "OSM"} · Confidence: ${oz.confidence} · Stand ${t.meta.zeiten_snapshot}</div>
+      <div class="wert">${tagesZeilen(oz.intervalle, now)}</div></div>` : ""}
     ${oz?.osm ? `<div class="block"><div class="label">OSM-Rohdaten · Confidence: ${oz.confidence}${oz.woche_instabil ? " · ⚠ nicht wochenstabil" : ""}</div>
       <div class="wert" style="font-family:ui-monospace,monospace;font-size:14px">${esc(oz.osm)}</div></div>` : ""}
     ${oz?.parse_fehler ? `<div class="block"><div class="label">Hinweis</div><div class="wert s-unbekannt">Zeiten-String nicht auswertbar: ${esc(oz.parse_fehler)}</div></div>` : ""}
     <div class="modal-btns">
-      <a href="https://maps.apple.com/?ll=${p.lat},${p.lon}&q=${encodeURIComponent(p.name)}" target="_blank" rel="noopener">Karte (online)</a>
+      <a href="https://www.google.com/maps/search/?api=1&query=${p.lat}%2C${p.lon}" target="_blank" rel="noopener">Google Maps</a>
       <button class="primaer" data-close>Schließen</button>
     </div>`);
 }
@@ -369,12 +369,10 @@ function zeigePosition() {
 }
 
 function zeigeGeschwindigkeit() {
-  const auto = autoSchnitt(state.samples, Date.now());
   oeffneModal(`
     <h2>Geschwindigkeit</h2>
-    <div class="untertitel">Gemessener Bewegungsschnitt (20 min): ${auto ? nf1.format(auto) + " km/h" : "noch keine Messung"}</div>
+    <div class="untertitel">Dein realistischer Fahr-Schnitt in Bewegung (ohne Pausen). Konservativ rechnet mit −20 % — gut für die Abendplanung.</div>
     <div class="segmente" id="v-seg">
-      <button data-m="auto" class="${state.speedMode === "auto" ? "active" : ""}">Auto</button>
       <button data-m="manuell" class="${state.speedMode === "manuell" ? "active" : ""}">Manuell</button>
       <button data-m="konservativ" class="${state.speedMode === "konservativ" ? "active" : ""}">Konservativ<br><small>−20 %</small></button>
     </div>
@@ -446,12 +444,6 @@ function onFix(fix) {
   state.matchIdx = m.idx;
   state.offRoute = m.offRoute;
   if (state.posMode === "gps") state.km = m.km;
-  // Abseits der Route ist der gematchte km eine Schätzung — solche Samples
-  // würden den Bewegungsschnitt mit Unsinns-Sprüngen füttern.
-  if (!m.offRoute && !annahme.ungenau) {
-    state.samples.push({ t: now, km: m.km });
-    if (state.samples.length > 200) state.samples.splice(0, 50);
-  }
   speichern();
   render();
 }
