@@ -1,7 +1,7 @@
 import {
   ANKER_TYPEN, ESSEN_TYPEN, LAEDEN_TYPEN, WASSER_TYPEN, LUECKE_KM,
   matchPosition, hmZwischen, naechsterClimb, fixAkzeptieren,
-  fahrzeitMin, etaMs,
+  fahrzeitMin, etaMs, effektivKmh, prognoseKm,
   statusZu, istAnker, findeLuecke, letzteVersorgungVorLuecke, letzterPunktDesTages,
 } from "./logic.js";
 
@@ -37,6 +37,10 @@ const state = {
   lastFixT: 0,
   speedMode: "manuell",    // manuell | konservativ (kein Auto-Tracking, Wunsch Max)
   manualKmh: 20,
+  stehMin: 10,             // Minuten Stehzeit (Klo, Einkauf …) pro Stunde Fahrt
+  ermuedung: 5,            // % Tempo-Abschlag pro weiterem Tourtag
+  planStunden: 10,         // geplante Stunden unterwegs (inkl. Stehzeit)
+  tage: [],                // abgeschlossene Tourtage {d, endKm, stunden, tempo, steh}
   filter: "alles",
   horizontKm: 50,
   wakeLock: null,
@@ -52,7 +56,9 @@ function speichern() {
       posMode: state.posMode, manualKm: state.manualKm, matchIdx: state.matchIdx,
       km: state.km,
       speedMode: state.speedMode, manualKmh: state.manualKmh, filter: state.filter,
+      stehMin: state.stehMin, ermuedung: state.ermuedung, planStunden: state.planStunden,
     }));
+    localStorage.setItem("versorgung-tage", JSON.stringify(state.tage));
   } catch { /* Speicher voll o. ä. — nicht kritisch */ }
 }
 // Gespeicherten Zustand validieren statt blind übernehmen — kaputte oder
@@ -68,6 +74,11 @@ function laden() {
     else if (s.speedMode === "auto") state.speedMode = "manuell"; // Migration alter Stände
     if (Number.isFinite(s.manualKmh)) state.manualKmh = Math.min(45, Math.max(5, s.manualKmh));
     if (["alles", "essen", "laeden", "wasser"].includes(s.filter)) state.filter = s.filter;
+    if (Number.isFinite(s.stehMin)) state.stehMin = Math.min(30, Math.max(0, s.stehMin));
+    if (Number.isFinite(s.ermuedung)) state.ermuedung = Math.min(20, Math.max(0, s.ermuedung));
+    if (Number.isFinite(s.planStunden)) state.planStunden = Math.min(18, Math.max(2, s.planStunden));
+    const tage = JSON.parse(localStorage.getItem("versorgung-tage") || "[]");
+    if (Array.isArray(tage)) state.tage = tage.filter((t) => t && Number.isFinite(t.endKm));
   } catch { /* egal */ }
 }
 
@@ -93,11 +104,14 @@ function esc(s) {
 
 // --- Geschwindigkeit ---------------------------------------------------------------
 
+// Alle ETAs rechnen mit dem EFFEKTIVEN Tempo: Bewegungstempo anteilig um
+// die Stehzeit reduziert — wir fahren ja nicht durch (Klo, Einkaufen, Fotos).
 function effektiverSchnitt() {
-  if (state.speedMode === "konservativ") {
-    return { v: state.manualKmh * 0.8, quelle: "konservativ" };
-  }
-  return { v: state.manualKmh, quelle: "manuell" };
+  const basis = state.speedMode === "konservativ" ? state.manualKmh * 0.8 : state.manualKmh;
+  return {
+    v: effektivKmh(basis, state.stehMin),
+    quelle: state.speedMode === "konservativ" ? "eff. konservativ" : "effektiv",
+  };
 }
 
 // --- Statuszeile pro POI ---------------------------------------------------------------
@@ -371,28 +385,154 @@ function zeigePosition() {
 function zeigeGeschwindigkeit() {
   oeffneModal(`
     <h2>Geschwindigkeit</h2>
-    <div class="untertitel">Dein realistischer Fahr-Schnitt in Bewegung (ohne Pausen). Konservativ rechnet mit −20 % — gut für die Abendplanung.</div>
+    <div class="untertitel">Fahr-Schnitt in Bewegung plus Stehzeit (Klo, Einkauf, Fotos) — alle Ankunftszeiten rechnen mit dem effektiven Tempo. Konservativ: −20 % aufs Fahrtempo.</div>
     <div class="segmente" id="v-seg">
       <button data-m="manuell" class="${state.speedMode === "manuell" ? "active" : ""}">Manuell</button>
       <button data-m="konservativ" class="${state.speedMode === "konservativ" ? "active" : ""}">Konservativ<br><small>−20 %</small></button>
     </div>
     <div class="feld" style="margin-top:14px">
-      <label>Manueller Wert (km/h)</label>
+      <label>Fahrtempo in Bewegung (km/h)</label>
       <input type="number" id="v-input" inputmode="decimal" min="5" max="45" step="0.5" value="${state.manualKmh}">
     </div>
+    <div class="feld">
+      <label>Stehzeit: Minuten pro Stunde Fahrt</label>
+      <input type="number" id="steh-input" inputmode="numeric" min="0" max="30" step="1" value="${state.stehMin}">
+    </div>
+    <div class="block"><div class="label">Effektives Reisetempo</div>
+      <div class="wert" id="v-eff">–</div></div>
     <div class="modal-btns"><button class="primaer" id="v-ok">Übernehmen</button></div>`);
   const seg = $("v-seg");
   let mode = state.speedMode;
+  const effAnzeigen = () => {
+    const v = parseFloat($("v-input").value) || state.manualKmh;
+    const steh = parseFloat($("steh-input").value) || 0;
+    const basis = mode === "konservativ" ? v * 0.8 : v;
+    $("v-eff").textContent = `${nf1.format(effektivKmh(basis, steh))} km/h`
+      + (mode === "konservativ" ? ` (konservativ: ${nf1.format(basis)} in Bewegung)` : "");
+  };
   seg.addEventListener("click", (e) => {
     const b = e.target.closest("button"); if (!b) return;
     mode = b.dataset.m;
     seg.querySelectorAll("button").forEach((x) => x.classList.toggle("active", x === b));
+    effAnzeigen();
   });
+  $("v-input").addEventListener("input", effAnzeigen);
+  $("steh-input").addEventListener("input", effAnzeigen);
+  effAnzeigen();
   $("v-ok").addEventListener("click", () => {
     state.speedMode = mode;
     const v = parseFloat($("v-input").value);
-    if (!Number.isNaN(v)) state.manualKmh = Math.min(45, Math.max(5, v));
+    if (Number.isFinite(v)) state.manualKmh = Math.min(45, Math.max(5, v));
+    const steh = parseFloat($("steh-input").value);
+    if (Number.isFinite(steh)) state.stehMin = Math.min(30, Math.max(0, steh));
     speichern(); schliesseModal(); render();
+  });
+}
+
+// --- Tagesplan: Prognose + Tagesabschluss ---------------------------------------
+
+function tageListe() {
+  if (!state.tage.length) return `<div class="wert dim-text">Noch kein Tag abgeschlossen.</div>`;
+  let vorher = 0;
+  return state.tage.map((t) => {
+    const tagKm = t.endKm - vorher;
+    vorher = t.endKm;
+    const ges = t.stunden > 0 ? tagKm / t.stunden : 0;
+    return `<div class="tages-zeile"><span>${esc(t.d)}</span>
+      <span class="zeiten">+${nf0.format(tagKm)} km (bis km ${nf0.format(t.endKm)}) · ${nf1.format(t.stunden)} h · Ø ${nf1.format(ges)}</span></div>`;
+  }).join("");
+}
+
+function zeigePlan() {
+  const t = state.tour;
+  const heute = new Date();
+  const morgenFruehMoeglich = heute.getHours() >= 12; // nachmittags plant man den Folgetag
+  oeffneModal(`
+    <h2>🗓 Tagesplan</h2>
+    <div class="untertitel">Wie weit kommen wir ab km ${km1(state.km)}? Rechnet mit effektivem Tempo (Fahrtempo + Stehzeit) und Höhenmetern; für morgen mit Ermüdungsabschlag.</div>
+    <div class="block"><div class="label">Bisherige Tage</div>${tageListe()}</div>
+    <div class="segmente" id="plan-tag-seg">
+      <button data-t="heute" class="${morgenFruehMoeglich ? "" : "active"}">ab jetzt</button>
+      <button data-t="morgen" class="${morgenFruehMoeglich ? "active" : ""}">morgen früh</button>
+    </div>
+    <div class="feld" style="margin-top:14px">
+      <label>Stunden unterwegs (inkl. Stehzeit)</label>
+      <input type="number" id="plan-stunden" inputmode="decimal" min="2" max="18" step="0.5" value="${state.planStunden}">
+    </div>
+    <div class="feld">
+      <label>Startzeit morgen</label>
+      <input type="number" id="plan-start" inputmode="numeric" min="4" max="12" step="1" value="7">
+    </div>
+    <div class="feld">
+      <label>Ermüdung: % langsamer pro weiterem Tag</label>
+      <input type="number" id="plan-erm" inputmode="numeric" min="0" max="20" step="1" value="${state.ermuedung}">
+    </div>
+    <div class="block"><div class="label">Prognose</div><div class="wert" id="plan-ergebnis">–</div></div>
+    <div class="modal-btns">
+      <button id="tag-abschliessen">Tag abschließen<br><small>bei km ${km1(state.km)}</small></button>
+      <button class="primaer" data-close>Fertig</button>
+    </div>`);
+
+  let planTag = morgenFruehMoeglich ? "morgen" : "heute";
+  const seg = $("plan-tag-seg");
+  seg.addEventListener("click", (e) => {
+    const b = e.target.closest("button"); if (!b) return;
+    planTag = b.dataset.t;
+    seg.querySelectorAll("button").forEach((x) => x.classList.toggle("active", x === b));
+    berechnen();
+  });
+
+  const berechnen = () => {
+    const stunden = Math.min(18, Math.max(2, parseFloat($("plan-stunden").value) || state.planStunden));
+    const erm = Math.min(20, Math.max(0, parseFloat($("plan-erm").value) || 0));
+    const startH = Math.min(12, Math.max(4, parseFloat($("plan-start").value) || 7));
+    // Basis: aktuelles Fahrtempo; morgen mit Ermüdungsabschlag
+    const basis = state.speedMode === "konservativ" ? state.manualKmh * 0.8 : state.manualKmh;
+    const tempoPlan = planTag === "morgen" ? basis * (1 - erm / 100) : basis;
+    const vEff = effektivKmh(tempoPlan, state.stehMin);
+    let startMs;
+    if (planTag === "morgen") {
+      const d = new Date(); d.setDate(d.getDate() + 1); d.setHours(startH, 0, 0, 0);
+      startMs = d.getTime();
+    } else {
+      startMs = Date.now();
+    }
+    const zielKm = prognoseKm(t.track, state.km, vEff, stunden);
+    const strecke = zielKm - state.km;
+    const hm = hmZwischen(t.track, state.km, zielKm);
+    const ankunft = startMs + stunden * 3600000;
+    // Letzte offene Versorgung vor dem Tagesziel
+    let letzte = null;
+    for (const p of t.pois) {
+      if (p.km > zielKm) break;
+      if (p.km <= state.km || !istAnker(p)) continue;
+      const eta = etaMs(t.track, state.km, p.km, vEff, startMs);
+      const st = statusZu(p.oeffnungszeiten, eta, t.meta.zeiten_fenster);
+      if (st.code === "offen" || st.code === "knapp") letzte = { p, st };
+    }
+    $("plan-ergebnis").innerHTML = `
+      <b>bis ~km ${nf0.format(zielKm)}</b> (${nf0.format(strecke)} km · +${nf0.format(hm)} hm)<br>
+      Tempo: ${nf1.format(vEff)} km/h effektiv${planTag === "morgen" && erm > 0 ? ` (inkl. −${erm} % Ermüdung)` : ""}<br>
+      ${planTag === "morgen" ? `${String(startH).padStart(2, "0")}:00` : "jetzt"} → Ankunft ~${uhrMitTag(ankunft, Date.now())}
+      ${zielKm >= t.meta.laenge_km ? "<br>🏁 <b>Das ist das Ziel!</b>" : ""}
+      ${letzte ? `<br>Letzte offene Versorgung davor: <b>${esc(letzte.p.name)}</b> km ${km1(letzte.p.km)} <span class="s-offen">(${letzte.st.code})</span>` : "<br><span class='s-zu'>Keine offene Versorgung bis dahin!</span>"}`;
+    state.planStunden = stunden;
+    state.ermuedung = erm;
+  };
+  ["plan-stunden", "plan-start", "plan-erm"].forEach((id) =>
+    $(id).addEventListener("input", berechnen));
+  berechnen();
+
+  $("tag-abschliessen").addEventListener("click", () => {
+    const d = new Date();
+    const key = `${WOCHENTAGE[d.getDay()]} ${d.getDate()}.${d.getMonth() + 1}.`;
+    const stunden = Math.min(18, Math.max(2, parseFloat($("plan-stunden").value) || state.planStunden));
+    const eintrag = { d: key, endKm: Math.round(state.km * 10) / 10, stunden, tempo: state.manualKmh, steh: state.stehMin };
+    const letzter = state.tage[state.tage.length - 1];
+    if (letzter && letzter.d === key) state.tage[state.tage.length - 1] = eintrag; // selber Tag: ersetzen
+    else state.tage.push(eintrag);
+    speichern();
+    zeigePlan(); // Modal mit aktualisierter Liste neu aufbauen
   });
 }
 
@@ -512,6 +652,7 @@ async function boot() {
     });
   });
   $("pos-btn").addEventListener("click", zeigePosition);
+  $("plan-btn").addEventListener("click", zeigePlan);
   $("speed-btn").addEventListener("click", zeigeGeschwindigkeit);
   $("wake-btn").addEventListener("click", toggleWakeLock);
   $("more-btn").addEventListener("click", () => { state.horizontKm += 50; render(); });

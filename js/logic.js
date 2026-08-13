@@ -147,6 +147,28 @@ export function etaMs(track, vonKm, bisKm, vKmh, nowMs) {
   return nowMs + fahrzeitMin(track, vonKm, bisKm, vKmh) * 60000;
 }
 
+// Effektives Reisetempo: Bewegungstempo anteilig um Stehzeit reduziert.
+// stehMinProStunde = Minuten Stillstand (Klo, Einkaufen, Foto) pro Stunde FAHRT.
+export function effektivKmh(bewegungKmh, stehMinProStunde) {
+  return bewegungKmh * 60 / (60 + Math.max(0, stehMinProStunde));
+}
+
+// Tagesplanung: Wie weit komme ich ab startKm in `stundenUnterwegs` Stunden
+// (inkl. Stehzeit, wenn vKmh bereits das effektive Tempo ist)? Invertiert
+// fahrzeitMin per Binärsuche — Höhenmeter bremsen also blockweise wie überall.
+export function prognoseKm(track, startKm, vKmh, stundenUnterwegs) {
+  const budgetMin = stundenUnterwegs * 60;
+  const laenge = track[track.length - 1][3];
+  if (startKm >= laenge) return laenge;
+  if (fahrzeitMin(track, startKm, laenge, vKmh) <= budgetMin) return laenge;
+  let lo = startKm, hi = laenge;
+  for (let i = 0; i < 30; i++) {
+    const mitte = (lo + hi) / 2;
+    if (fahrzeitMin(track, startKm, mitte, vKmh) < budgetMin) lo = mitte; else hi = mitte;
+  }
+  return lo;
+}
+
 // --- 6.3 Öffnungsstatus -------------------------------------------------------
 
 // oz = poi.oeffnungszeiten ({confidence, intervalle: [[vonMs,bisMs,unknown],…]})

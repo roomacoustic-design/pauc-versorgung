@@ -117,11 +117,14 @@ main { padding: 10px 10px 30px; max-width: 640px; margin: 0 auto; }
 
 .leer { color: var(--dim); text-align: center; padding: 24px 0; font-size: 16px; }
 
-#more-btn.ghost {
-  width: 100%; padding: 14px; font-size: 16px; font-weight: 600;
+.ghost {
+  width: 100%; padding: 14px; font-size: 16px; font-weight: 600; font-family: inherit;
   background: none; color: var(--accent); border: 1px dashed var(--line);
   border-radius: 12px; margin: 4px 0 14px;
 }
+#plan-btn { margin: 0 0 4px; }
+.dim-text { color: var(--dim); }
+.modal-btns button small { font-weight: 500; color: var(--dim); }
 
 /* Höhen-Info */
 #climb-info .zeile { display: flex; justify-content: space-between; font-size: 16px; padding: 3px 0; }
