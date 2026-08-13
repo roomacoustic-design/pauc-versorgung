@@ -1,8 +1,9 @@
 import {
   ANKER_TYPEN, ESSEN_TYPEN, LAEDEN_TYPEN, WASSER_TYPEN,
   gruppiere, LUECKE_KM,
-  matchPosition, hmZwischen, naechsterClimb, fixAkzeptieren,
+  matchPosition, hmZwischen, cumHmAt, naechsterClimb, fixAkzeptieren,
   fahrzeitMin, etaMs, effektivKmh, prognoseKm,
+  sonnenuntergangMs, naechsterTyp, ersteOffeneBaeckerei,
   statusZu, istAnker, findeLuecke, letzteVersorgungVorLuecke, letzterPunktDesTages,
 } from "./logic.js";
 
@@ -79,7 +80,7 @@ function laden() {
     if (Number.isFinite(s.manualKmh)) state.manualKmh = Math.min(45, Math.max(5, s.manualKmh));
     if (["alles", "essen", "laeden", "wasser"].includes(s.filter)) state.filter = s.filter;
     else if (s.filter === "schlafen") { state.filter = "alles"; state.tab = "betten"; } // Migration
-    if (s.tab === "versorgung" || s.tab === "betten") state.tab = s.tab;
+    if (["versorgung", "betten", "karte"].includes(s.tab)) state.tab = s.tab;
     if (Number.isFinite(s.stehMin)) state.stehMin = Math.min(30, Math.max(0, s.stehMin));
     if (Number.isFinite(s.ermuedung)) state.ermuedung = Math.min(20, Math.max(0, s.ermuedung));
     if (Number.isFinite(s.planStunden)) state.planStunden = Math.min(18, Math.max(2, s.planStunden));
@@ -134,12 +135,20 @@ function statusHtml(poi, eta) {
   const fenster = state.tour.meta.zeiten_fenster;
   if (!ESSEN_TYPEN.has(poi.typ)) return "";                       // Wasser & Co: keine Zeiten nötig
   const st = statusZu(oz, eta, fenster);
+  const warn = oz?.widerspruch ? " ⚠" : ""; // Google & OSM widersprechen sich
   switch (st.code) {
-    case "offen": return `<div class="status s-offen">offen ${bisText(st.bis, eta)}</div>`;
-    case "knapp": return `<div class="status s-knapp">knapp! schließt ${uhrMitTag(st.bis, eta)}</div>`;
-    case "zu": return `<div class="status s-zu">zu${st.naechste ? ` — öffnet ${uhrMitTag(st.naechste, eta)}` : ""}</div>`;
+    case "offen": return `<div class="status s-offen">offen ${bisText(st.bis, eta)}${warn}</div>`;
+    case "knapp": return `<div class="status s-knapp">knapp! schließt ${uhrMitTag(st.bis, eta)}${warn}</div>`;
+    case "zu": return `<div class="status s-zu">zu${st.naechste ? ` — öffnet ${uhrMitTag(st.naechste, eta)}` : ""}${warn}</div>`;
     default: return `<div class="status s-unbekannt">Zeiten unbekannt</div>`;
   }
+}
+
+// Trackpunkt zur aktuellen Position (für Sonnenstand und Karte)
+function aktuellerTrackpunkt() {
+  const t = state.tour.track;
+  if (state.matchIdx >= 0 && state.matchIdx < t.length) return t[state.matchIdx];
+  return t[0];
 }
 
 // --- Rendering ---------------------------------------------------------------
@@ -221,7 +230,13 @@ function render() {
   }
   $("warn").innerHTML = warnHtml;
 
-  // Letzter Punkt des Tages (abendliche Kernfrage)
+  // Letzter Punkt des Tages (abendliche Kernfrage) + Tageslicht
+  const [posLat, posLon] = aktuellerTrackpunkt();
+  const su = sonnenuntergangMs(now, posLat, posLon);
+  const rest = su - now;
+  const sonnenZeile = rest > 0
+    ? `<div class="neben dim-text">☀ Sonnenuntergang ${uhr(su)} · noch ${Math.floor(rest / 3600000)}:${String(Math.floor(rest / 60000) % 60).padStart(2, "0")} h Tageslicht</div>`
+    : `<div class="neben dim-text">☀ Sonne ist unter (${uhr(su)})</div>`;
   const letzterHeute = letzterPunktDesTages(t.pois, t.track, state.km, now, v, fenster);
   if (letzterHeute) {
     const p = letzterHeute.poi;
@@ -229,21 +244,35 @@ function render() {
       <div class="titel">🌙 Heute noch erreichbar</div>
       <div class="neben"><b>${ICONS[p.typ] || ""} ${esc(p.name)}</b> · km ${km1(p.km)} · in ${km1(Math.max(0, p.km - state.km))} km</div>
       <div class="neben">Ankunft ~${uhr(letzterHeute.eta)} · <span class="s-offen">offen ${bisText(letzterHeute.status.bis, now)}</span></div>
+      ${sonnenZeile}
     </button>`;
   } else {
     $("dayend").innerHTML = `<div class="card">
       <div class="titel">🌙 Heute</div>
       <div class="neben s-zu">Kein Laden mehr offen erreichbar.</div>
+      ${sonnenZeile}
     </div>`;
   }
 
-  // Tab-Sichtbarkeit: Betten-Ansicht blendet das Versorgungs-Cockpit aus
+  // Schnellzeile: nächstes Wasser / WC (die Dauerfrage bei Hitze)
+  const nWasser = naechsterTyp(t.pois, state.km, new Set(["Trinkwasser", "Quelle", "Friedhof (Trinkwasser)"]));
+  const nWc = naechsterTyp(t.pois, state.km, new Set(["Toilette"]));
+  $("quick").innerHTML = `
+    ${nWasser ? `<button class="quick-btn poi-open" data-id="${nWasser.id}">💧 Wasser in <b>${km1(nWasser.km - state.km)} km</b></button>` : ""}
+    ${nWc ? `<button class="quick-btn poi-open" data-id="${nWc.id}">🚻 WC in <b>${km1(nWc.km - state.km)} km</b></button>` : ""}`;
+
+  // Tab-Sichtbarkeit: Versorgung (alles), Betten (nur Liste), Karte (nur SVG)
   const betten = state.tab === "betten";
-  for (const id of ["warn", "dayend", "plan-btn", "filters", "climb-info"]) {
-    $(id).hidden = betten;
+  const karteTab = state.tab === "karte";
+  for (const id of ["warn", "dayend", "quick", "plan-btn", "filters", "climb-info"]) {
+    $(id).hidden = betten || karteTab;
   }
+  $("poi-list").hidden = karteTab;
+  $("more-btn").hidden = karteTab;
+  $("karte").hidden = !karteTab;
   document.querySelectorAll("#tabs .tab").forEach((b) =>
     b.classList.toggle("active", b.dataset.tab === state.tab));
+  if (karteTab) renderKarte();
 
   // POI-Liste (Versorgung) bzw. Unterkünfte (Betten-Tab)
   const set = FILTER_SETS[state.filter];
@@ -469,6 +498,151 @@ function zeigeGeschwindigkeit() {
   });
 }
 
+// --- Mini-Karte: Route als SVG, Position, POI-Punkte — bewusst kein Navi --------
+
+const KARTE_PROJ = 111.32; // km pro Breitengrad; Länge mit cos(lat) skaliert
+let karte = null;
+
+function kartePunkt(lat, lon) {
+  return [lon * karte.f * KARTE_PROJ, -lat * KARTE_PROJ];
+}
+
+function karteViewBox() {
+  const v = karte.view;
+  karte.svg.setAttribute("viewBox", `${v.x} ${v.y} ${v.w} ${v.h}`);
+}
+
+function karteGroessen() { // Punkt-/Textgrößen an Zoomstufe anpassen (nur bei Zoom)
+  const k = karte.view.w;
+  karte.svg.querySelectorAll(".k-anker").forEach((c) => c.setAttribute("r", (k * 0.006).toFixed(2)));
+  karte.svg.querySelectorAll(".k-wasser").forEach((c) => c.setAttribute("r", (k * 0.0035).toFixed(2)));
+  karte.labels.setAttribute("font-size", (k * 0.022).toFixed(2));
+  karte.pos.setAttribute("r", (k * 0.012).toFixed(2));
+  karte.pos.setAttribute("stroke-width", (k * 0.004).toFixed(2));
+}
+
+function bauKarte() {
+  const t = state.tour.track;
+  const N = "http://www.w3.org/2000/svg";
+  const svg = $("karte-svg");
+  karte = { svg, f: Math.cos(t[Math.floor(t.length / 2)][0] * Math.PI / 180) };
+
+  const pts = [];
+  for (let i = 0; i < t.length; i += 6) pts.push(kartePunkt(t[i][0], t[i][1]));
+  pts.push(kartePunkt(t[t.length - 1][0], t[t.length - 1][1]));
+  let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+  for (const [x, y] of pts) {
+    if (x < minX) minX = x; if (x > maxX) maxX = x;
+    if (y < minY) minY = y; if (y > maxY) maxY = y;
+  }
+  const pad = (maxX - minX) * 0.06;
+  karte.initial = { x: minX - pad, y: minY - pad, w: maxX - minX + 2 * pad, h: maxY - minY + 2 * pad };
+  karte.view = { ...karte.initial };
+
+  const pfad = document.createElementNS(N, "path");
+  pfad.setAttribute("d", "M" + pts.map(([x, y]) => `${x.toFixed(2)},${y.toFixed(2)}`).join("L"));
+  pfad.setAttribute("fill", "none");
+  pfad.setAttribute("stroke", "#38bdf8");
+  pfad.setAttribute("stroke-width", "2.5");
+  pfad.setAttribute("vector-effect", "non-scaling-stroke");
+  pfad.setAttribute("stroke-linejoin", "round");
+  svg.appendChild(pfad);
+
+  const dots = document.createElementNS(N, "g");
+  for (const p of state.tour.pois) {
+    let cls = null;
+    if (istAnker(p)) cls = "k-anker";
+    else if (["Trinkwasser", "Quelle", "Friedhof (Trinkwasser)"].includes(p.typ)) cls = "k-wasser";
+    if (!cls) continue;
+    const [x, y] = kartePunkt(p.lat, p.lon);
+    const c = document.createElementNS(N, "circle");
+    c.setAttribute("cx", x.toFixed(2));
+    c.setAttribute("cy", y.toFixed(2));
+    c.setAttribute("class", cls);
+    c.setAttribute("fill", cls === "k-anker" ? "#fbbf24" : "#60a5fa");
+    dots.appendChild(c);
+  }
+  svg.appendChild(dots);
+
+  // 100-km-Marken zur Orientierung
+  const labels = document.createElementNS(N, "g");
+  labels.setAttribute("fill", "#94a3b8");
+  let marke = 100;
+  for (const tp of t) {
+    if (tp[3] >= marke) {
+      const [x, y] = kartePunkt(tp[0], tp[1]);
+      const txt = document.createElementNS(N, "text");
+      txt.setAttribute("x", x.toFixed(2));
+      txt.setAttribute("y", y.toFixed(2));
+      txt.textContent = String(marke);
+      labels.appendChild(txt);
+      marke += 100;
+    }
+  }
+  svg.appendChild(labels);
+  karte.labels = labels;
+
+  const pos = document.createElementNS(N, "circle");
+  pos.setAttribute("fill", "#4ade80");
+  pos.setAttribute("stroke", "#0b1220");
+  svg.appendChild(pos);
+  karte.pos = pos;
+
+  karteGroessen();
+  karteViewBox();
+
+  // Pan per Finger/Maus (ein Zeiger reicht am Lenker), Zoom über Knöpfe
+  let drag = null;
+  svg.addEventListener("pointerdown", (e) => {
+    drag = { x: e.clientX, y: e.clientY };
+    svg.setPointerCapture(e.pointerId);
+  });
+  svg.addEventListener("pointermove", (e) => {
+    if (!drag) return;
+    const skala = karte.view.w / svg.clientWidth;
+    karte.view.x -= (e.clientX - drag.x) * skala;
+    karte.view.y -= (e.clientY - drag.y) * skala;
+    drag = { x: e.clientX, y: e.clientY };
+    karteViewBox();
+  });
+  svg.addEventListener("pointerup", () => { drag = null; });
+  svg.addEventListener("pointercancel", () => { drag = null; });
+
+  $("karte-tools").addEventListener("click", (e) => {
+    const b = e.target.closest("button");
+    if (!b || !karte) return;
+    const v = karte.view;
+    if (b.dataset.k === "plus" || b.dataset.k === "minus") {
+      const f = b.dataset.k === "plus" ? 0.5 : 2;
+      const neuW = Math.min(v.w * f, karte.initial.w * 1.5);
+      const neuH = v.h * (neuW / v.w);
+      v.x += (v.w - neuW) / 2;
+      v.y += (v.h - neuH) / 2;
+      v.w = neuW; v.h = neuH;
+    } else if (b.dataset.k === "pos") {
+      const [x, y] = kartePunkt(...aktuellerTrackpunkt());
+      if (v.w > karte.initial.w * 0.2) { // beim Zentrieren sinnvoll reinzoomen
+        v.w = karte.initial.w * 0.12;
+        v.h = karte.initial.h * 0.12;
+      }
+      v.x = x - v.w / 2; v.y = y - v.h / 2;
+    } else if (b.dataset.k === "alles") {
+      karte.view = { ...karte.initial };
+    }
+    karteGroessen();
+    karteViewBox();
+  });
+}
+
+function renderKarte() {
+  if (!state.tour) return;
+  if (!karte) bauKarte();
+  const [lat, lon] = aktuellerTrackpunkt();
+  const [x, y] = kartePunkt(lat, lon);
+  karte.pos.setAttribute("cx", x.toFixed(2));
+  karte.pos.setAttribute("cy", y.toFixed(2));
+}
+
 // --- Tagesplan: Prognose + Tagesabschluss ---------------------------------------
 
 function tageListe() {
@@ -490,6 +664,8 @@ function zeigePlan() {
   oeffneModal(`
     <h2>🗓 Tagesplan</h2>
     <div class="untertitel">Wie weit kommen wir ab km ${km1(state.km)}? Rechnet mit effektivem Tempo (Fahrtempo + Stehzeit) und Höhenmetern; für morgen mit Ermüdungsabschlag.</div>
+    <div class="block"><div class="label">Tour-Fortschritt</div>
+      <div class="wert">km ${nf0.format(state.km)} von ${nf0.format(t.meta.laenge_km)} (${nf0.format(state.km / t.meta.laenge_km * 100)} %) · ${nf0.format(cumHmAt(t.track, state.km))} von ${nf0.format(t.meta.hoehenmeter)} hm · Tag ${state.tage.length + 1}</div></div>
     <div class="block"><div class="label">Bisherige Tage</div>${tageListe()}</div>
     <div class="segmente" id="plan-tag-seg">
       <button data-t="heute" class="${morgenFruehMoeglich ? "" : "active"}">ab jetzt</button>
@@ -550,12 +726,17 @@ function zeigePlan() {
       const st = statusZu(p.oeffnungszeiten, eta, t.meta.zeiten_fenster);
       if (st.code === "offen" || st.code === "knapp") letzte = { p, st };
     }
+    // Morgenblick: Wo gibt's das erste Frühstück?
+    const baeckerei = planTag === "morgen"
+      ? ersteOffeneBaeckerei(t.pois, t.track, state.km, zielKm, startMs, vEff, t.meta.zeiten_fenster)
+      : null;
     $("plan-ergebnis").innerHTML = `
       <b>bis ~km ${nf0.format(zielKm)}</b> (${nf0.format(strecke)} km · +${nf0.format(hm)} hm)<br>
       Tempo: ${nf1.format(vEff)} km/h effektiv${planTag === "morgen" && erm > 0 ? ` (inkl. −${erm} % Ermüdung)` : ""}<br>
       ${planTag === "morgen" ? `${String(startH).padStart(2, "0")}:00` : "jetzt"} → Ankunft ~${uhrMitTag(ankunft, Date.now())}
       ${zielKm >= t.meta.laenge_km ? "<br>🏁 <b>Das ist das Ziel!</b>" : ""}
-      ${letzte ? `<br>Letzte offene Versorgung davor: <b>${esc(letzte.p.name)}</b> km ${km1(letzte.p.km)} <span class="s-offen">(${letzte.st.code})</span>` : "<br><span class='s-zu'>Keine offene Versorgung bis dahin!</span>"}`;
+      ${letzte ? `<br>Letzte offene Versorgung davor: <b>${esc(letzte.p.name)}</b> km ${km1(letzte.p.km)} <span class="s-offen">(${letzte.st.code})</span>` : "<br><span class='s-zu'>Keine offene Versorgung bis dahin!</span>"}
+      ${baeckerei ? `<br>🥐 Erste offene Bäckerei: <b>${esc(baeckerei.poi.name)}</b> km ${km1(baeckerei.poi.km)} (in ${km1(baeckerei.poi.km - state.km)} km)${baeckerei.oeffnetMs ? ` · öffnet ${uhr(baeckerei.oeffnetMs)}` : ""}` : planTag === "morgen" ? "<br><span class='dim-text'>🥐 Keine offene Bäckerei bis zum Tagesziel</span>" : ""}`;
     state.planStunden = stunden;
     state.ermuedung = erm;
   };

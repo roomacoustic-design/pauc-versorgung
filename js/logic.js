@@ -200,6 +200,54 @@ export function prognoseKm(track, startKm, vKmh, stundenUnterwegs) {
   return lo;
 }
 
+// --- Sonne & Schnellinfos -----------------------------------------------------
+
+// Sonnenuntergang als Epoch-ms für Datum + Position (NOAA-Näherung, ±2 min).
+// Rein offline — genau das Richtige für "wie viel Tageslicht bleibt?".
+export function sonnenuntergangMs(dateMs, lat, lon) {
+  const d = new Date(dateMs);
+  const start = new Date(d.getFullYear(), 0, 0);
+  const tag = Math.floor((d - start) / 86400000);
+  const rad = Math.PI / 180;
+  const gamma = 2 * Math.PI / 365 * (tag - 1 + 0.5);
+  const eqtime = 229.18 * (0.000075 + 0.001868 * Math.cos(gamma) - 0.032077 * Math.sin(gamma)
+    - 0.014615 * Math.cos(2 * gamma) - 0.040849 * Math.sin(2 * gamma));
+  const decl = 0.006918 - 0.399912 * Math.cos(gamma) + 0.070257 * Math.sin(gamma)
+    - 0.006758 * Math.cos(2 * gamma) + 0.000907 * Math.sin(2 * gamma)
+    - 0.002697 * Math.cos(3 * gamma) + 0.00148 * Math.sin(3 * gamma);
+  const cosHa = Math.cos(90.833 * rad) / (Math.cos(lat * rad) * Math.cos(decl))
+    - Math.tan(lat * rad) * Math.tan(decl);
+  const ha = Math.acos(Math.min(1, Math.max(-1, cosHa))); // Polar-Clamp
+  // NOAA: Untergang = 720 − 4·(lon − ha); mit +ha käme der AUFGANG heraus
+  const minutenUtc = 720 - 4 * (lon - ha / rad) - eqtime;
+  return Date.UTC(d.getFullYear(), d.getMonth(), d.getDate()) + minutenUtc * 60000;
+}
+
+// Nächster POI eines Typs voraus (z. B. "nächstes Wasser in 3,2 km")
+export function naechsterTyp(pois, aktKm, typen) {
+  for (const p of pois) {
+    if (p.km > aktKm && typen.has(p.typ)) return p;
+  }
+  return null;
+}
+
+// Morgenblick: erste Bäckerei ab vonKm, die bei Ankunft offen hat.
+// Liefert auch die Öffnungszeit des getroffenen Intervalls ("öffnet 06:30").
+export function ersteOffeneBaeckerei(pois, track, vonKm, bisKm, startMs, vKmh, fenster) {
+  for (const p of pois) {
+    if (p.km <= vonKm) continue;
+    if (p.km > bisKm) break;
+    if (p.typ !== "Bäckerei") continue;
+    const eta = etaMs(track, vonKm, p.km, vKmh, startMs);
+    const st = statusZu(p.oeffnungszeiten, eta, fenster);
+    if (st.code === "offen" || st.code === "knapp") {
+      const iv = p.oeffnungszeiten.intervalle.find(([a, b, u]) => !u && eta >= a && eta < b);
+      return { poi: p, eta, oeffnetMs: iv ? iv[0] : null };
+    }
+  }
+  return null;
+}
+
 // --- 6.3 Öffnungsstatus -------------------------------------------------------
 
 // oz = poi.oeffnungszeiten ({confidence, intervalle: [[vonMs,bisMs,unknown],…]})

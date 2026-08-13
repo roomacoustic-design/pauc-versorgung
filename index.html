@@ -35,10 +35,12 @@
     <nav id="tabs">
       <button data-tab="versorgung" class="tab active">🥖 Versorgung</button>
       <button data-tab="betten" class="tab">🛏 Betten</button>
+      <button data-tab="karte" class="tab">🗺 Karte</button>
     </nav>
 
     <section id="warn"></section>
     <section id="dayend"></section>
+    <section id="quick"></section>
 
     <button id="plan-btn" class="ghost">🗓 Tagesplan &amp; Tagesabschluss</button>
 
@@ -53,6 +55,17 @@
     <button id="more-btn" class="ghost">weiter voraus zeigen</button>
 
     <section id="climb-info"></section>
+
+    <section id="karte" hidden>
+      <div id="karte-tools">
+        <button data-k="minus">−</button>
+        <button data-k="plus">＋</button>
+        <button data-k="pos">⌖ Position</button>
+        <button data-k="alles">⤢ Route</button>
+      </div>
+      <svg id="karte-svg"></svg>
+      <div class="karte-legende">● Route&ensp;<span style="color:#4ade80">●</span> Du&ensp;<span style="color:#fbbf24">●</span> Läden&ensp;<span style="color:#60a5fa">●</span> Wasser · Zahlen = km</div>
+    </section>
 
     <footer id="attrib"></footer>
   </main>
