@@ -121,15 +121,29 @@ function render() {
   $("gps-status").textContent = state.posMode === "manuell" ? "km gesetzt"
     : { aus: "GPS aus", warte: "suche GPS…", ok: "GPS ok", fehler: "GPS-Fehler" }[state.gpsStatus];
 
+  // GPS-Problem? Großer Knopf — iOS zeigt den Standort-Dialog zuverlässig
+  // erst nach einer echten Nutzer-Geste.
+  let warnHtml = "";
+  const gpsHaengt = state.gpsStatus === "warte" && now - (state.gpsSeit || 0) > 8000;
+  if (state.posMode === "gps"
+      && (state.gpsStatus === "fehler" || state.gpsStatus === "aus" || gpsHaengt)) {
+    const hinweis = state.gpsError === 1
+      ? "Standort ist blockiert. iPhone: Einstellungen → Datenschutz → Ortungsdienste → Safari-Websites (bzw. „Versorgung“) → „Beim Verwenden“. Danach hier tippen."
+      : "Hier tippen, um die Standortfreigabe anzustoßen.";
+    warnHtml += `<button class="card warnung" id="gps-retry" style="width:100%;text-align:left;font:inherit;color:inherit">
+      <div class="titel">📡 GPS aktivieren</div>
+      <div class="neben">${hinweis}</div>
+    </button>`;
+  }
+
   // Lückenwarnung
   const luecke = findeLuecke(t.pois, t.meta.laenge_km, state.km);
-  let warnHtml = "";
   if (luecke) {
     const letzte = letzteVersorgungVorLuecke(luecke, t.track, state.km, now, v, fenster);
     const ziel = luecke.bisZiel ? "bis zum Ziel" : `${nf0.format(luecke.laengeKm)} km ohne alles`;
     if (letzte) {
       const p = letzte.poi;
-      warnHtml = `<button class="card warnung poi-open" data-id="${p.id}" style="width:100%;text-align:left;font:inherit;color:inherit">
+      warnHtml += `<button class="card warnung poi-open" data-id="${p.id}" style="width:100%;text-align:left;font:inherit;color:inherit">
         <div class="titel">⚠ Letzte Versorgung vor Lücke</div>
         <div class="haupt">${ICONS[p.typ] || ""} ${esc(p.name)} · km ${km1(p.km)}</div>
         <div class="neben">in ${km1(p.km - state.km)} km · Ankunft ~${uhr(letzte.eta)} ·
@@ -137,13 +151,13 @@ function render() {
         <div class="neben">danach ${ziel}</div>
       </button>`;
     } else if (luecke.ankerDavor.length === 0) {
-      warnHtml = `<div class="card warnung">
+      warnHtml += `<div class="card warnung">
         <div class="titel">⚠ Versorgungslücke</div>
         <div class="haupt">Nächste verlässliche Versorgung erst in ${nf0.format(luecke.bisKm - state.km)} km</div>
         ${luecke.naechsterDanach ? `<div class="neben">${esc(luecke.naechsterDanach.name)} · km ${km1(luecke.naechsterDanach.km)}</div>` : ""}
       </div>`;
     } else {
-      warnHtml = `<div class="card warnung">
+      warnHtml += `<div class="card warnung">
         <div class="titel">⚠ Lücke voraus — nichts mehr offen davor</div>
         <div class="haupt">Ab km ${km1(luecke.vonKm)}: ${ziel}</div>
         <div class="neben">Kein Laden vor der Lücke hat bei Ankunft noch offen.</div>
@@ -363,13 +377,17 @@ function setzeKm(km) {
 }
 
 function startGps() {
-  if (!navigator.geolocation) { state.gpsStatus = "fehler"; return; }
+  if (!navigator.geolocation) { state.gpsStatus = "fehler"; state.gpsError = 0; return; }
   state.posMode = "gps";
   state.gpsStatus = "warte";
+  state.gpsError = null;
+  state.gpsSeit = Date.now();
   if (watchId !== null) navigator.geolocation.clearWatch(watchId);
-  watchId = navigator.geolocation.watchPosition(onFix, () => {
-    state.gpsStatus = "fehler"; render();
+  watchId = navigator.geolocation.watchPosition(onFix, (err) => {
+    state.gpsStatus = "fehler"; state.gpsError = err.code; render();
   }, { enableHighAccuracy: true, maximumAge: 10000, timeout: 30000 });
+  render();
+  setTimeout(render, 8500); // falls iOS die Anfrage stumm ignoriert: Banner zeigen
 }
 
 function onFix(fix) {
@@ -431,6 +449,7 @@ async function boot() {
   $("wake-btn").addEventListener("click", toggleWakeLock);
   $("more-btn").addEventListener("click", () => { state.horizontKm += 50; render(); });
   document.body.addEventListener("click", (e) => {
+    if (e.target.closest("#gps-retry")) { startGps(); return; }
     const open = e.target.closest(".poi-open");
     if (open) zeigePoi(Number(open.dataset.id));
     if (e.target.closest("[data-close]") || e.target === $("modal-backdrop")) schliesseModal();
