@@ -2,7 +2,7 @@
 // Cache (cache-first). Neue Version => VERSION hochzählen.
 // Bei jedem neuen Daten- oder Code-Stand hochzählen, sonst liefert der
 // Cache alte Bundles aus.
-const VERSION = "v14-2026-08-14";
+const VERSION = "v15-2026-08-14";
 const CACHE = `versorgung-${VERSION}`;
 const ASSETS = [
   ".",

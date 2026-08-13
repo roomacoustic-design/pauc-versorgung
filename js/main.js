@@ -279,6 +279,15 @@ function render() {
     ${nWasser ? `<button class="quick-btn poi-open" data-id="${nWasser.id}">💧 Wasser in <b>${km1(nWasser.km - state.km)} km</b></button>` : ""}
     ${nWc ? `<button class="quick-btn poi-open" data-id="${nWc.id}">🚻 WC in <b>${km1(nWc.km - state.km)} km</b></button>` : ""}`;
 
+  // Tour-Fortschritt: immer sichtbar, direkt unter der Kopfzeile
+  const restKm = Math.max(0, t.meta.laenge_km - state.km);
+  const restHm = Math.max(0, t.meta.hoehenmeter - cumHmAt(t.track, state.km));
+  const prozent = Math.min(100, state.km / t.meta.laenge_km * 100);
+  $("balken-voll").style.width = `${prozent.toFixed(1)}%`;
+  $("fortschritt-text").innerHTML = restKm < 0.1
+    ? "🏁 Ziel erreicht — 1.068 km, chapeau!"
+    : `noch <b>${nf0.format(restKm)} km</b> · <b>${nf0.format(restHm)} hm</b> bis zum Ziel · ${nf0.format(prozent)} % geschafft`;
+
   // Tab-Sichtbarkeit: Versorgung (alles), Betten (nur Liste), Karte (nur SVG)
   const betten = state.tab === "betten";
   const karteTab = state.tab === "karte";

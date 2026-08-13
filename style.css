@@ -224,3 +224,17 @@ main { padding: 10px 10px 30px; max-width: 640px; margin: 0 auto; }
 }
 .karte-legende { color: var(--dim); font-size: 13px; text-align: center; margin-top: 8px; }
 #tabs .tab { font-size: 15px; }
+
+/* Tour-Fortschritt unter der Kopfzeile */
+#fortschritt { margin-bottom: 10px; }
+#fortschritt .balken {
+  height: 5px; background: var(--card2); border-radius: 3px; overflow: hidden;
+}
+#fortschritt .balken-voll {
+  height: 100%; background: var(--accent); border-radius: 3px; width: 0;
+}
+#fortschritt .text {
+  font-size: 14px; color: var(--dim); text-align: center; margin-top: 5px;
+  font-variant-numeric: tabular-nums;
+}
+#fortschritt .text b { color: var(--text); }
