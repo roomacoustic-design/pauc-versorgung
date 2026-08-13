@@ -14,6 +14,37 @@ export const LAEDEN_TYPEN = new Set([
 export const WASSER_TYPEN = new Set([
   "Trinkwasser", "Quelle", "Friedhof (Trinkwasser)", "Toilette",
 ]);
+export const SCHLAF_TYPEN = new Set(["Unterkunft"]);
+
+// Nur diese Typen werden in der Liste zu Gruppen gefaltet — Läden, Bäckereien
+// etc. bleiben bewusst einzeln (jeder hat eigene Zeiten/Namen).
+export const GRUPPEN_TYPEN = new Set([
+  "Trinkwasser", "Toilette", "Friedhof (Trinkwasser)", "Quelle",
+]);
+
+// Dicht aufeinanderfolgende Punkte GLEICHEN Typs (Kette: je <= maxAbstandKm
+// zum letzten Gruppenmitglied) zu einer Gruppe falten. Andere Typen dürfen
+// dazwischen liegen (Brunnendorf: Wasser-Toilette-Wasser), sie bleiben eigene
+// Einträge. Liefert [{poi} | {gruppe: [pois]}] in km-Reihenfolge.
+export function gruppiere(pois, maxAbstandKm = 0.15) {
+  const out = [];
+  const verbraucht = new Set();
+  for (let i = 0; i < pois.length; i++) {
+    if (verbraucht.has(i)) continue;
+    const p = pois[i];
+    if (!GRUPPEN_TYPEN.has(p.typ)) { out.push({ poi: p }); continue; }
+    const gruppe = [p];
+    let letzteKm = p.km;
+    for (let j = i + 1; j < pois.length && pois[j].km - letzteKm <= maxAbstandKm; j++) {
+      if (verbraucht.has(j) || pois[j].typ !== p.typ) continue;
+      gruppe.push(pois[j]);
+      verbraucht.add(j);
+      letzteKm = pois[j].km;
+    }
+    out.push(gruppe.length > 1 ? { gruppe } : { poi: p });
+  }
+  return out;
+}
 
 export const PUFFER_MIN = 30;        // "offen" braucht >= 30 min bis Ladenschluss
 export const OFFROUTE_M = 150;

@@ -1,5 +1,6 @@
 import {
-  ANKER_TYPEN, ESSEN_TYPEN, LAEDEN_TYPEN, WASSER_TYPEN, LUECKE_KM,
+  ANKER_TYPEN, ESSEN_TYPEN, LAEDEN_TYPEN, WASSER_TYPEN, SCHLAF_TYPEN,
+  gruppiere, LUECKE_KM,
   matchPosition, hmZwischen, naechsterClimb, fixAkzeptieren,
   fahrzeitMin, etaMs, effektivKmh, prognoseKm,
   statusZu, istAnker, findeLuecke, letzteVersorgungVorLuecke, letzterPunktDesTages,
@@ -22,9 +23,9 @@ const ICONS = {
   "Tankstelle": "⛽", "Kiosk": "🗞️", "Getränkemarkt": "🧃", "Café": "☕",
   "Fast Food": "🍔", "Eisdiele": "🍦", "Trinkwasser": "💧", "Quelle": "⛲",
   "Friedhof (Trinkwasser)": "🪦", "Toilette": "🚻", "Verkaufsautomat": "🥤",
-  "Checkpoint": "📍",
+  "Checkpoint": "📍", "Unterkunft": "🛏️",
 };
-const FILTER_SETS = { essen: ESSEN_TYPEN, laeden: LAEDEN_TYPEN, wasser: WASSER_TYPEN };
+const FILTER_SETS = { essen: ESSEN_TYPEN, laeden: LAEDEN_TYPEN, wasser: WASSER_TYPEN, schlafen: SCHLAF_TYPEN };
 
 const state = {
   tour: null,
@@ -73,7 +74,7 @@ function laden() {
     if (["manuell", "konservativ"].includes(s.speedMode)) state.speedMode = s.speedMode;
     else if (s.speedMode === "auto") state.speedMode = "manuell"; // Migration alter Stände
     if (Number.isFinite(s.manualKmh)) state.manualKmh = Math.min(45, Math.max(5, s.manualKmh));
-    if (["alles", "essen", "laeden", "wasser"].includes(s.filter)) state.filter = s.filter;
+    if (["alles", "essen", "laeden", "wasser", "schlafen"].includes(s.filter)) state.filter = s.filter;
     if (Number.isFinite(s.stehMin)) state.stehMin = Math.min(30, Math.max(0, s.stehMin));
     if (Number.isFinite(s.ermuedung)) state.ermuedung = Math.min(20, Math.max(0, s.ermuedung));
     if (Number.isFinite(s.planStunden)) state.planStunden = Math.min(18, Math.max(2, s.planStunden));
@@ -236,15 +237,36 @@ function render() {
   const voraus = t.pois.filter((p) =>
     p.km > state.km - 0.3 && p.km <= state.km + state.horizontKm
     && (!set || set.has(p.typ)));
-  const rows = voraus.slice(0, 400).map((p) => {
+  const eintraege = gruppiere(voraus).slice(0, 400);
+  const rows = eintraege.map((e) => {
+    if (e.gruppe) {
+      const p = e.gruppe[0];
+      const letzte = e.gruppe[e.gruppe.length - 1];
+      const eta = etaMs(t.track, state.km, p.km, v, now);
+      return `<button class="poi gruppe-open" data-ids="${e.gruppe.map((x) => x.id).join(",")}">
+        <span class="icon">${ICONS[p.typ] || "❓"}</span>
+        <span class="mitte">
+          <div class="name">${esc(p.typ)} ×${e.gruppe.length}</div>
+          <div class="status dim-text">verteilt bis km ${km1(letzte.km)} · antippen für alle</div>
+        </span>
+        <span class="rechts">
+          <div class="dist">${km1(Math.max(0, p.km - state.km))} km</div>
+          <div class="eta">~${uhrMitTag(eta, now)}</div>
+        </span>
+      </button>`;
+    }
+    const p = e.poi;
     const eta = etaMs(t.track, state.km, p.km, v, now);
     const bonus = ESSEN_TYPEN.has(p.typ)
       && (!p.oeffnungszeiten || p.oeffnungszeiten.confidence === "keine");
+    const zusatz = p.typ === "Unterkunft"
+      ? `<div class="status dim-text">${esc(p.unterart || "Unterkunft")} · ${p.abstand_route_m} m abseits</div>`
+      : statusHtml(p, eta);
     return `<button class="poi poi-open ${bonus ? "bonus" : ""}" data-id="${p.id}">
       <span class="icon">${ICONS[p.typ] || "❓"}</span>
       <span class="mitte">
         <div class="name">${esc(p.name)}</div>
-        ${statusHtml(p, eta)}
+        ${zusatz}
       </span>
       <span class="rechts">
         <div class="dist">${km1(Math.max(0, p.km - state.km))} km</div>
@@ -311,7 +333,7 @@ function zeigePoi(id) {
 
   oeffneModal(`
     <h2>${ICONS[p.typ] || ""} ${esc(p.name)}</h2>
-    <div class="untertitel">${esc(p.typ)} · km ${km1(p.km)} · ${p.abstand_route_m ?? "?"} m neben der Route</div>
+    <div class="untertitel">${esc(p.unterart || p.typ)} · km ${km1(p.km)} · ${p.abstand_route_m ?? "?"} m neben der Route</div>
     <div class="block">
       <div class="label">Ankunft</div>
       <div class="wert">in ${km1(Math.max(0, p.km - state.km))} km (+${nf0.format(hm)} hm) · ~${uhrMitTag(eta, now)}<br>${stText}</div>
@@ -324,6 +346,9 @@ function zeigePoi(id) {
     ${oz?.osm ? `<div class="block"><div class="label">OSM-Rohdaten · Confidence: ${oz.confidence}${oz.woche_instabil ? " · ⚠ nicht wochenstabil" : ""}</div>
       <div class="wert" style="font-family:ui-monospace,monospace;font-size:14px">${esc(oz.osm)}</div></div>` : ""}
     ${oz?.parse_fehler ? `<div class="block"><div class="label">Hinweis</div><div class="wert s-unbekannt">Zeiten-String nicht auswertbar: ${esc(oz.parse_fehler)}</div></div>` : ""}
+    ${p.telefon || p.website ? `<div class="block"><div class="label">Kontakt (online)</div>
+      <div class="wert">${p.telefon ? `<a class="kontakt" href="tel:${esc(p.telefon)}">📞 ${esc(p.telefon)}</a>` : ""}
+      ${p.website ? `<a class="kontakt" href="${esc(p.website)}" target="_blank" rel="noopener">🌐 Website</a>` : ""}</div></div>` : ""}
     <div class="modal-btns">
       <a href="https://www.google.com/maps/search/?api=1&query=${p.lat}%2C${p.lon}" target="_blank" rel="noopener">Google Maps</a>
       <button class="primaer" data-close>Schließen</button>
@@ -536,6 +561,26 @@ function zeigePlan() {
   });
 }
 
+// --- Gruppen-Detail (Brunnendorf: alle Einzelpunkte) -----------------------------
+
+function zeigeGruppe(idsCsv) {
+  const t = state.tour;
+  const ids = idsCsv.split(",").map(Number);
+  const punkte = ids.map((id) => t.pois.find((p) => p.id === id)).filter(Boolean);
+  if (!punkte.length) return;
+  const typ = punkte[0].typ;
+  oeffneModal(`
+    <h2>${ICONS[typ] || ""} ${esc(typ)} ×${punkte.length}</h2>
+    <div class="untertitel">Einzelpunkte antippen für Details und Karte.</div>
+    ${punkte.map((p) => `<button class="poi poi-open" data-id="${p.id}" style="margin-bottom:8px">
+      <span class="icon">${ICONS[p.typ] || ""}</span>
+      <span class="mitte"><div class="name">km ${km1(p.km)}</div>
+        <div class="status dim-text">${p.abstand_route_m} m neben der Route</div></span>
+      <span class="rechts"><div class="dist">${km1(Math.max(0, p.km - state.km))} km</div></span>
+    </button>`).join("")}
+    <div class="modal-btns"><button class="primaer" data-close>Schließen</button></div>`);
+}
+
 // --- Modal-Gerüst ---------------------------------------------------------------
 
 function oeffneModal(html) {
@@ -658,6 +703,8 @@ async function boot() {
   $("more-btn").addEventListener("click", () => { state.horizontKm += 50; render(); });
   document.body.addEventListener("click", (e) => {
     if (e.target.closest("#gps-retry")) { startGps(); return; }
+    const gruppe = e.target.closest(".gruppe-open");
+    if (gruppe) { zeigeGruppe(gruppe.dataset.ids); return; }
     if (e.target.closest("#update-hint")) { location.reload(); return; }
     const open = e.target.closest(".poi-open");
     if (open) zeigePoi(Number(open.dataset.id));

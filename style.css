@@ -184,3 +184,7 @@ main { padding: 10px 10px 30px; max-width: 640px; margin: 0 auto; }
 
 /* Zwei-Quellen-Anzeige im POI-Detail */
 .quelle-titel { font-size: 13px; font-weight: 700; color: var(--accent); }
+
+/* Kontakt-Links im Unterkunfts-Detail */
+.kontakt { display: inline-block; color: var(--accent); font-weight: 600;
+  text-decoration: none; padding: 6px 12px 6px 0; }
