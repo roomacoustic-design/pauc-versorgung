@@ -1,8 +1,21 @@
 import {
   ANKER_TYPEN, ESSEN_TYPEN, LAEDEN_TYPEN, WASSER_TYPEN, LUECKE_KM,
-  matchPosition, hmZwischen, naechsterClimb, autoSchnitt, fahrzeitMin, etaMs,
+  matchPosition, hmZwischen, naechsterClimb, autoSchnitt, fixAkzeptieren,
+  fahrzeitMin, etaMs,
   statusZu, istAnker, findeLuecke, letzteVersorgungVorLuecke, letzterPunktDesTages,
 } from "./logic.js";
+
+// Fehler niemals stumm schlucken — auf Tour ist ein toter Bildschirm ohne
+// Meldung der schlimmste Zustand.
+function zeigeFehler(text) {
+  const el = document.getElementById("fatal");
+  if (!el) return;
+  el.hidden = false;
+  el.textContent = `⚠ ${text}`;
+}
+window.addEventListener("error", (e) => zeigeFehler(`Fehler: ${e.message}`));
+window.addEventListener("unhandledrejection", (e) =>
+  zeigeFehler(`Fehler: ${e.reason?.message || e.reason}`));
 
 const ICONS = {
   "Supermarkt": "🛒", "Nachbarschaftsladen": "🏪", "Bäckerei": "🥖",
@@ -36,15 +49,26 @@ const $ = (id) => document.getElementById(id);
 // --- Persistenz ---------------------------------------------------------------
 
 function speichern() {
-  localStorage.setItem("versorgung", JSON.stringify({
-    posMode: state.posMode, manualKm: state.manualKm, matchIdx: state.matchIdx,
-    speedMode: state.speedMode, manualKmh: state.manualKmh, filter: state.filter,
-  }));
+  try {
+    localStorage.setItem("versorgung", JSON.stringify({
+      posMode: state.posMode, manualKm: state.manualKm, matchIdx: state.matchIdx,
+      km: state.km,
+      speedMode: state.speedMode, manualKmh: state.manualKmh, filter: state.filter,
+    }));
+  } catch { /* Speicher voll o. ä. — nicht kritisch */ }
 }
+// Gespeicherten Zustand validieren statt blind übernehmen — kaputte oder
+// veraltete Werte dürfen die App nicht in einen Unsinns-Zustand ziehen.
 function laden() {
   try {
     const s = JSON.parse(localStorage.getItem("versorgung") || "{}");
-    Object.assign(state, s);
+    if (s.posMode === "gps" || s.posMode === "manuell") state.posMode = s.posMode;
+    if (Number.isFinite(s.manualKm)) state.manualKm = Math.max(0, s.manualKm);
+    if (Number.isFinite(s.matchIdx) && s.matchIdx >= 0) state.matchIdx = Math.floor(s.matchIdx);
+    if (Number.isFinite(s.km)) state.km = Math.max(0, s.km); // letzter Stand bis zum ersten Fix
+    if (["auto", "manuell", "konservativ"].includes(s.speedMode)) state.speedMode = s.speedMode;
+    if (Number.isFinite(s.manualKmh)) state.manualKmh = Math.min(45, Math.max(5, s.manualKmh));
+    if (["alles", "essen", "laeden", "wasser"].includes(s.filter)) state.filter = s.filter;
   } catch { /* egal */ }
 }
 
@@ -118,8 +142,17 @@ function render() {
   $("speed-val").textContent = nf1.format(v);
   $("speed-mode").textContent = quelle;
   $("clock").textContent = uhr(now);
-  $("gps-status").textContent = state.posMode === "manuell" ? "km gesetzt"
-    : { aus: "GPS aus", warte: "suche GPS…", ok: "GPS ok", fehler: "GPS-Fehler" }[state.gpsStatus];
+  // Fix-Alter ehrlich anzeigen: ein 10 Minuten alter Stand darf nicht wie
+  // "GPS ok" aussehen — veraltete Distanzen sind gefährlicher als keine.
+  const fixAlterMin = state.lastFixT ? Math.floor((now - state.lastFixT) / 60000) : null;
+  let gpsText = { aus: "GPS aus", warte: "suche GPS…", ok: "GPS ok", ungenau: "GPS ungenau", fehler: "GPS-Fehler" }[state.gpsStatus];
+  if (state.posMode === "manuell") gpsText = "km gesetzt";
+  else if ((state.gpsStatus === "ok" || state.gpsStatus === "ungenau") && fixAlterMin >= 2) {
+    gpsText = `Fix vor ${fixAlterMin} min`;
+  }
+  $("gps-status").textContent = gpsText;
+  $("gps-status").classList.toggle("warnend",
+    state.posMode === "gps" && (state.gpsStatus === "ungenau" || fixAlterMin >= 2));
 
   // GPS-Problem? Großer Knopf — iOS zeigt den Standort-Dialog zuverlässig
   // erst nach einer echten Nutzer-Geste.
@@ -129,7 +162,9 @@ function render() {
       && (state.gpsStatus === "fehler" || state.gpsStatus === "aus" || gpsHaengt)) {
     const hinweis = state.gpsError === 1
       ? "Standort ist blockiert. iPhone: Einstellungen → Datenschutz → Ortungsdienste → Safari-Websites (bzw. „Versorgung“) → „Beim Verwenden“. Danach hier tippen."
-      : "Hier tippen, um die Standortfreigabe anzustoßen.";
+      : gpsHaengt
+        ? "Kein brauchbares GPS-Signal (freie Sicht zum Himmel?). Hier tippen für Neustart der Suche."
+        : "Hier tippen, um die Standortfreigabe anzustoßen.";
     warnHtml += `<button class="card warnung" id="gps-retry" style="width:100%;text-align:left;font:inherit;color:inherit">
       <div class="titel">📡 GPS aktivieren</div>
       <div class="neben">${hinweis}</div>
@@ -137,7 +172,8 @@ function render() {
   }
 
   // Lückenwarnung
-  const luecke = findeLuecke(t.pois, t.meta.laenge_km, state.km);
+  const luecke = findeLuecke(t.pois, t.meta.laenge_km, state.km, LUECKE_KM,
+    { track: t.track, nowMs: now, vKmh: v, fenster });
   if (luecke) {
     const letzte = letzteVersorgungVorLuecke(luecke, t.track, state.km, now, v, fenster);
     const ziel = luecke.bisZiel ? "bis zum Ziel" : `${nf0.format(luecke.laengeKm)} km ohne alles`;
@@ -146,8 +182,10 @@ function render() {
       warnHtml += `<button class="card warnung poi-open" data-id="${p.id}" style="width:100%;text-align:left;font:inherit;color:inherit">
         <div class="titel">⚠ Letzte Versorgung vor Lücke</div>
         <div class="haupt">${ICONS[p.typ] || ""} ${esc(p.name)} · km ${km1(p.km)}</div>
-        <div class="neben">in ${km1(p.km - state.km)} km · Ankunft ~${uhr(letzte.eta)} ·
-          <span class="${letzte.status.code === "knapp" ? "s-knapp" : "s-offen"}">offen ${bisText(letzte.status.bis, now)}</span></div>
+        <div class="neben">in ${km1(Math.max(0, p.km - state.km))} km · Ankunft ~${uhr(letzte.eta)} ·
+          ${letzte.status.code === "knapp"
+            ? `<span class="s-knapp">knapp! schließt ${uhrMitTag(letzte.status.bis, now)}</span>`
+            : `<span class="s-offen">offen ${bisText(letzte.status.bis, now)}</span>`}</div>
         <div class="neben">danach ${ziel}</div>
       </button>`;
     } else if (luecke.ankerDavor.length === 0) {
@@ -172,7 +210,7 @@ function render() {
     const p = letzterHeute.poi;
     $("dayend").innerHTML = `<button class="card poi-open" data-id="${p.id}" style="width:100%;text-align:left;font:inherit;color:inherit">
       <div class="titel">🌙 Heute noch erreichbar (letzter Laden)</div>
-      <div class="neben"><b>${ICONS[p.typ] || ""} ${esc(p.name)}</b> · km ${km1(p.km)} · in ${km1(p.km - state.km)} km</div>
+      <div class="neben"><b>${ICONS[p.typ] || ""} ${esc(p.name)}</b> · km ${km1(p.km)} · in ${km1(Math.max(0, p.km - state.km))} km</div>
       <div class="neben">Ankunft ~${uhr(letzterHeute.eta)} · <span class="s-offen">offen ${bisText(letzterHeute.status.bis, now)}</span></div>
     </button>`;
   } else {
@@ -187,7 +225,7 @@ function render() {
   const voraus = t.pois.filter((p) =>
     p.km > state.km - 0.3 && p.km <= state.km + state.horizontKm
     && (!set || set.has(p.typ)));
-  const rows = voraus.slice(0, 60).map((p) => {
+  const rows = voraus.slice(0, 400).map((p) => {
     const eta = etaMs(t.track, state.km, p.km, v, now);
     const bonus = ESSEN_TYPEN.has(p.typ)
       && (!p.oeffnungszeiten || p.oeffnungszeiten.confidence === "keine");
@@ -198,8 +236,8 @@ function render() {
         ${statusHtml(p, eta)}
       </span>
       <span class="rechts">
-        <div class="dist">${km1(p.km - state.km)} km</div>
-        <div class="eta">~${uhr(eta)}</div>
+        <div class="dist">${km1(Math.max(0, p.km - state.km))} km</div>
+        <div class="eta">~${uhrMitTag(eta, now)}</div>
       </span>
     </button>`;
   });
@@ -229,11 +267,12 @@ function render() {
 function tagesZeilen(oz, refMs) {
   if (!oz?.intervalle?.length) return "";
   const proTag = new Map();
-  for (const [von, bis] of oz.intervalle) {
+  for (const [von, bis, unbekannt] of oz.intervalle) {
     const d = new Date(von);
     const key = `${WOCHENTAGE[d.getDay()]} ${d.getDate()}.${d.getMonth() + 1}.`;
     if (!proTag.has(key)) proTag.set(key, []);
-    proTag.get(key).push(`${uhr(von)}–${uhr(bis)}`);
+    // unbestätigte Intervalle (opening_hours "unknown") mit ? markieren
+    proTag.get(key).push(`${uhr(von)}–${uhr(bis)}${unbekannt ? "\u202f?" : ""}`);
   }
   const heute = new Date(refMs);
   const heuteKey = `${WOCHENTAGE[heute.getDay()]} ${heute.getDate()}.${heute.getMonth() + 1}.`;
@@ -317,8 +356,11 @@ function zeigePosition() {
   $("pos-ok").addEventListener("click", () => {
     state.posMode = mode;
     if (mode === "manuell") {
-      state.manualKm = Math.min(max, Math.max(0, parseFloat(input.value) || 0));
+      const wert = parseFloat(input.value);
+      state.manualKm = Number.isFinite(wert)
+        ? Math.min(max, Math.max(0, wert)) : state.km; // Unsinn-Eingabe: bleiben
       setzeKm(state.manualKm);
+      stopGps();
     } else {
       startGps();
     }
@@ -367,6 +409,10 @@ function schliesseModal() { $("modal-backdrop").hidden = true; }
 // --- GPS ---------------------------------------------------------------
 
 let watchId = null;
+function stopGps() {
+  if (watchId !== null) { navigator.geolocation.clearWatch(watchId); watchId = null; }
+  state.gpsStatus = "aus";
+}
 function setzeKm(km) {
   const t = state.tour.track;
   let lo = 0, hi = t.length - 1; // Index zur km-Angabe (für Fenster-Matching)
@@ -392,47 +438,76 @@ function startGps() {
 
 function onFix(fix) {
   const now = Date.now();
-  if (now - state.lastFixT < 15000) return;             // Akku: max. alle 15 s
-  if (fix.coords.accuracy > 200) return;                 // Müll-Fixe ignorieren
+  const annahme = fixAkzeptieren(state.lastFixT, now, fix.coords.accuracy);
+  if (!annahme.ok) return;
   state.lastFixT = now;
-  state.gpsStatus = "ok";
+  state.gpsStatus = annahme.ungenau ? "ungenau" : "ok";
   const m = matchPosition(state.tour.track, state.matchIdx, fix.coords.latitude, fix.coords.longitude);
   state.matchIdx = m.idx;
   state.offRoute = m.offRoute;
   if (state.posMode === "gps") state.km = m.km;
-  state.samples.push({ t: now, km: m.km });
-  if (state.samples.length > 200) state.samples.splice(0, 50);
+  // Abseits der Route ist der gematchte km eine Schätzung — solche Samples
+  // würden den Bewegungsschnitt mit Unsinns-Sprüngen füttern.
+  if (!m.offRoute && !annahme.ungenau) {
+    state.samples.push({ t: now, km: m.km });
+    if (state.samples.length > 200) state.samples.splice(0, 50);
+  }
   speichern();
   render();
 }
 
 // --- Wake Lock ---------------------------------------------------------------
 
-async function toggleWakeLock() {
-  if (state.wakeLock) {
-    await state.wakeLock.release().catch(() => {});
-    state.wakeLock = null;
-  } else if ("wakeLock" in navigator) {
-    try { state.wakeLock = await navigator.wakeLock.request("screen"); } catch { /* verweigert */ }
-    state.wakeLock?.addEventListener("release", () => {
-      state.wakeLock = null; $("wake-btn").classList.remove("an");
-    });
-  }
-  $("wake-btn").classList.toggle("an", !!state.wakeLock);
+async function fordereWakeLock() {
+  try {
+    state.wakeLock = await navigator.wakeLock.request("screen");
+    state.wakeLock.addEventListener("release", () => { state.wakeLock = null; });
+  } catch { state.wakeLock = null; }
 }
-document.addEventListener("visibilitychange", async () => {
-  // iOS gibt den Lock beim Wechsel frei — beim Zurückkommen erneuern
-  if (document.visibilityState === "visible" && $("wake-btn").classList.contains("an") && !state.wakeLock) {
-    try { state.wakeLock = await navigator.wakeLock.request("screen"); } catch { /* ok */ }
-  }
+async function toggleWakeLock() {
+  // Wahrheitsquelle ist das Gewollt-Flag — iOS released den Lock bei jedem
+  // App-Wechsel, die Anzeige darf davon nicht kippen.
+  state.wakeLockGewollt = !state.wakeLockGewollt && "wakeLock" in navigator;
+  if (state.wakeLockGewollt) await fordereWakeLock();
+  else { await state.wakeLock?.release().catch(() => {}); state.wakeLock = null; }
+  $("wake-btn").classList.toggle("an", state.wakeLockGewollt);
+}
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState !== "visible") return;
+  // iOS gibt den Lock beim Wechsel frei — beim Zurückkommen erneuern,
+  // und die im Hintergrund eingefrorenen ETAs/Uhr sofort auffrischen.
+  if (state.wakeLockGewollt && !state.wakeLock) fordereWakeLock();
+  render();
 });
 
 // --- Boot ---------------------------------------------------------------
 
 async function boot() {
   laden();
-  const res = await fetch("tour.json");
-  state.tour = await res.json();
+  // Tour-Bundle mit Retry laden — beim allerersten Start (noch kein Cache)
+  // darf ein Netz-Wackler nicht in einem toten Bildschirm enden.
+  let tour = null;
+  for (let versuch = 1; versuch <= 3; versuch++) {
+    try {
+      const res = await fetch("tour.json");
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      tour = await res.json();
+      break;
+    } catch (e) {
+      if (versuch === 3) {
+        zeigeFehler(`Tour-Daten konnten nicht geladen werden (${e.message}). `
+          + `Einmal mit Internet öffnen, danach läuft alles offline.`);
+        return;
+      }
+      await new Promise((r) => setTimeout(r, 800 * versuch));
+    }
+  }
+  state.tour = tour;
+  // Gespeicherten Zustand gegen das geladene Bundle klemmen
+  const maxKm = tour.meta.laenge_km;
+  state.manualKm = Math.min(state.manualKm, maxKm);
+  state.km = Math.min(state.km, maxKm);
+  if (state.matchIdx >= tour.track.length) state.matchIdx = -1;
   if (state.posMode === "manuell") setzeKm(state.manualKm);
   else startGps();
 
@@ -450,6 +525,7 @@ async function boot() {
   $("more-btn").addEventListener("click", () => { state.horizontKm += 50; render(); });
   document.body.addEventListener("click", (e) => {
     if (e.target.closest("#gps-retry")) { startGps(); return; }
+    if (e.target.closest("#update-hint")) { location.reload(); return; }
     const open = e.target.closest(".poi-open");
     if (open) zeigePoi(Number(open.dataset.id));
     if (e.target.closest("[data-close]") || e.target === $("modal-backdrop")) schliesseModal();
@@ -457,9 +533,21 @@ async function boot() {
 
   render();
   setInterval(render, 30000); // ETAs/Uhr alle 30 s auffrischen
+  navigator.storage?.persist?.().catch(() => {});
 
   if ("serviceWorker" in navigator) {
-    navigator.serviceWorker.register("sw.js").catch(() => {});
+    // Update-Fluss sichtbar machen: neuer SW aktiviert => ein Tipp lädt die
+    // neue Version, statt auf das "zweimal öffnen"-Ritual zu vertrauen.
+    navigator.serviceWorker.register("sw.js").then((reg) => {
+      reg.addEventListener("updatefound", () => {
+        const neu = reg.installing;
+        neu?.addEventListener("statechange", () => {
+          if (neu.state === "activated" && navigator.serviceWorker.controller) {
+            $("update-hint").hidden = false;
+          }
+        });
+      });
+    }).catch(() => {});
   }
 }
 

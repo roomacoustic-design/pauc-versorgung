@@ -31,22 +31,31 @@ export function haversineM(lat1, lon1, lat2, lon2) {
 
 // lastIdx < 0 = Kaltstart (Vollsuche). Fenster -200/+2000 erzwingt
 // Vorwärtsfortschritt; > 150 m Abstand => Vollsuche + off route.
-export function matchPosition(track, lastIdx, lat, lon) {
-  const n = track.length;
-  let bestIdx = 0, bestD = Infinity;
-  const scan = (from, to) => {
-    for (let i = Math.max(0, from); i < Math.min(n, to); i++) {
-      const d = haversineM(lat, lon, track[i][0], track[i][1]);
-      if (d < bestD) { bestD = d; bestIdx = i; }
-    }
-  };
-  if (lastIdx >= 0) {
-    scan(lastIdx - 200, lastIdx + 2000);
-    if (bestD > OFFROUTE_M) { bestD = Infinity; scan(0, n); }
-  } else {
-    scan(0, n);
+function suche(track, lat, lon, from, to) {
+  let idx = 0, d = Infinity;
+  for (let i = Math.max(0, from); i < Math.min(track.length, to); i++) {
+    const h = haversineM(lat, lon, track[i][0], track[i][1]);
+    if (h < d) { d = h; idx = i; }
   }
-  return { idx: bestIdx, km: track[bestIdx][3], distM: bestD, offRoute: bestD > OFFROUTE_M };
+  return { idx, d };
+}
+
+export function matchPosition(track, lastIdx, lat, lon) {
+  let r;
+  if (lastIdx >= 0) {
+    r = suche(track, lat, lon, lastIdx - 200, lastIdx + 2000);
+    if (r.d > OFFROUTE_M) {
+      // Vollsuche — aber bei Selbstannäherung der Route (zwei Schenkel < 150 m)
+      // gewinnt der Kandidat nahe der letzten Position gegen einen minimal
+      // näheren fernen Schenkel, sonst springt die Position kilometerweit.
+      const voll = suche(track, lat, lon, 0, track.length);
+      const lokal = suche(track, lat, lon, lastIdx - 1000, lastIdx + 1000);
+      r = lokal.d <= OFFROUTE_M ? lokal : voll;
+    }
+  } else {
+    r = suche(track, lat, lon, 0, track.length);
+  }
+  return { idx: r.idx, km: track[r.idx][3], distM: r.d, offRoute: r.d > OFFROUTE_M };
 }
 
 // --- Höhenprofil -------------------------------------------------------------
@@ -80,20 +89,38 @@ export function naechsterClimb(climbs, km) {
 
 // --- 6.2/6.4 Geschwindigkeit & ETA -------------------------------------------
 
-// Bewegungsschnitt aus GPS-Samples [{t(ms), km}]: gleitend über 20 min,
-// Segmente unter 4 km/h gelten als Pause und fallen raus.
+// Bewegungsschnitt aus GPS-Samples [{t(ms), km}]: gleitend über 20 min.
+// Segmente unter 4 km/h sind Pausen, Segmente über 60 km/h sind GPS-Glitches
+// oder Re-Match-Sprünge (Kreuzung/Full-Search) — beide fallen raus, sonst
+// verdirbt ein einziger km-Sprung den Schnitt und damit alle ETAs.
+export const GLITCH_KMH = 60;
 export function autoSchnitt(samples, nowMs) {
   const seit = nowMs - 20 * 60000;
   let dist = 0, zeit = 0;
   for (let i = 1; i < samples.length; i++) {
     const a = samples[i - 1], b = samples[i];
     if (b.t < seit || b.t <= a.t) continue;
+    // Zeitloch (App war suspendiert, Funkloch): EIN Segment über 60+ min
+    // Hintergrund würde alle frischen 15-s-Segmente erdrücken — überspringen.
+    if (b.t - a.t > 90000) continue;
     const dtH = (b.t - a.t) / 3600000;
     const dKm = Math.abs(b.km - a.km);
-    if (dKm / dtH >= 4) { dist += dKm; zeit += dtH; }
+    const v = dKm / dtH;
+    if (v >= 4 && v <= GLITCH_KMH) { dist += dKm; zeit += dtH; }
   }
   if (zeit < 3 / 60) return null; // unter 3 min Bewegung: keine Aussage
   return dist / zeit;
+}
+
+// GPS-Fix-Annahme: 15-s-Drossel (Akku) + Genauigkeitsfilter mit Notlauf.
+// Normal nur Fixe <= 150 m Genauigkeit; kam aber > 2 min nichts Brauchbares
+// (Schlucht, Wald), lieber ein grober Fix mit Warnung als stumm veralten.
+export function fixAkzeptieren(letzterFixT, nowMs, accuracyM) {
+  if (nowMs - letzterFixT < 15000) return { ok: false, grund: "drossel" };
+  const notlauf = nowMs - letzterFixT > 120000;
+  if (accuracyM <= 150) return { ok: true, ungenau: false };
+  if (notlauf && accuracyM <= 1000) return { ok: true, ungenau: true };
+  return { ok: false, grund: "ungenau" };
 }
 
 // Steigungsfaktor: ab 20 hm/km wird's langsamer, bei 60+ hm/km (= 600 hm/10 km,
@@ -141,20 +168,49 @@ export function statusZu(oz, tMs, fenster) {
 }
 
 // Verlässlicher Anker: echte Verpflegung + Zeiten vorhanden (confidence
-// mittel/hoch). "Unbekannt ist nicht offen": ohne Zeiten nie Teil der Kette.
+// mittel/hoch) + mindestens EIN offenes Intervall im Tour-Fenster.
+// "Unbekannt ist nicht offen": ohne Zeiten nie Teil der Kette — und ein
+// Laden mit Betriebsferien ("Jul-Aug off": Zeiten da, aber nie offen) darf
+// die Lückenwarnung nicht unterdrücken.
 export function istAnker(poi) {
+  const oz = poi.oeffnungszeiten;
   return ANKER_TYPEN.has(poi.typ)
-    && poi.oeffnungszeiten
-    && (poi.oeffnungszeiten.confidence === "mittel" || poi.oeffnungszeiten.confidence === "hoch");
+    && !!oz
+    && (oz.confidence === "mittel" || oz.confidence === "hoch")
+    && Array.isArray(oz.intervalle)
+    && oz.intervalle.some(([, , unbekannt]) => !unbekannt);
 }
 
 // --- 6.5 Lückenwarnung --------------------------------------------------------
 
+// Zählt ein Anker zur Versorgungskette? Nur wenn er im Fenster [ETA, ETA+16h]
+// mindestens einmal öffnet. Ein montags geschlossener Laden ist am Montag
+// KEINE Versorgung — mit 16-h-Horizont (Übernachtung) bleibt die Kette aber
+// abends stabil: "öffnet morgen früh" zählt, Betriebsferien zählen nie.
+export function ankerNutzbar(poi, etaMsWert, fenster) {
+  if (fenster && etaMsWert >= fenster[1]) return true; // hinter dem Datenfenster: neutral
+  const bis = etaMsWert + 16 * 3600000;
+  return poi.oeffnungszeiten.intervalle.some(
+    ([von, ende, unbekannt]) => !unbekannt && ende > etaMsWert && von < bis);
+}
+
 // Nächste Lücke > schwelleKm in der Ankerkette ab aktueller Position.
+// Mit `zeit` ({track, nowMs, vKmh, fenster}) ist die Kette ruhetagsbewusst
+// (ankerNutzbar zur je akkumulierten ETA); ohne `zeit` reine km-Kette.
 // Liefert null oder { vonKm, bisKm, laengeKm, ankerDavor: [POIs aufsteigend],
 // naechsterDanach, bisZiel }.
-export function findeLuecke(pois, streckeKm, aktKm, schwelleKm = LUECKE_KM) {
-  const anker = pois.filter(p => istAnker(p) && p.km > aktKm - 0.2);
+export function findeLuecke(pois, streckeKm, aktKm, schwelleKm = LUECKE_KM, zeit = null) {
+  let anker = pois.filter(p => istAnker(p) && p.km > aktKm - 0.2);
+  if (zeit) {
+    const nutzbar = [];
+    let kmAkk = aktKm, minAkk = 0;
+    for (const a of anker) {
+      minAkk += fahrzeitMin(zeit.track, kmAkk, a.km, zeit.vKmh);
+      kmAkk = a.km;
+      if (ankerNutzbar(a, zeit.nowMs + minAkk * 60000, zeit.fenster)) nutzbar.push(a);
+    }
+    anker = nutzbar;
+  }
   let prevKm = aktKm;
   const davor = [];
   for (const a of anker) {

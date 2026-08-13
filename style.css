@@ -26,6 +26,20 @@ body {
   overscroll-behavior-y: none;
 }
 
+/* Fehler- und Update-Banner */
+#fatal {
+  background: #7f1d1d; color: #fff; font-size: 16px; font-weight: 600;
+  padding: calc(env(safe-area-inset-top) + 10px) 14px 10px; line-height: 1.4;
+}
+#fatal[hidden] { display: none; }
+#update-hint {
+  position: fixed; bottom: calc(env(safe-area-inset-bottom) + 12px); left: 12px; right: 12px;
+  z-index: 40; padding: 15px; font: inherit; font-size: 16px; font-weight: 700;
+  background: var(--accent); color: #06283a; border: none; border-radius: 14px;
+  box-shadow: 0 4px 20px rgba(0,0,0,.5);
+}
+#update-hint[hidden] { display: none; }
+
 /* Kopfzeile */
 #topbar {
   position: sticky; top: 0; z-index: 10;
