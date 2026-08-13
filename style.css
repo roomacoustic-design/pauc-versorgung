@@ -188,3 +188,12 @@ main { padding: 10px 10px 30px; max-width: 640px; margin: 0 auto; }
 /* Kontakt-Links im Unterkunfts-Detail */
 .kontakt { display: inline-block; color: var(--accent); font-weight: 600;
   text-decoration: none; padding: 6px 12px 6px 0; }
+
+/* Haupt-Tabs: Versorgung / Betten */
+#tabs { display: flex; gap: 8px; margin-bottom: 12px; }
+.tab {
+  flex: 1; padding: 13px 0; font-size: 17px; font-weight: 700; font-family: inherit;
+  background: var(--card); color: var(--dim);
+  border: 1px solid var(--line); border-radius: 12px;
+}
+.tab.active { background: var(--card2); color: var(--text); border-color: var(--accent); }

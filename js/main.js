@@ -1,5 +1,5 @@
 import {
-  ANKER_TYPEN, ESSEN_TYPEN, LAEDEN_TYPEN, WASSER_TYPEN, SCHLAF_TYPEN,
+  ANKER_TYPEN, ESSEN_TYPEN, LAEDEN_TYPEN, WASSER_TYPEN,
   gruppiere, LUECKE_KM,
   matchPosition, hmZwischen, naechsterClimb, fixAkzeptieren,
   fahrzeitMin, etaMs, effektivKmh, prognoseKm,
@@ -25,7 +25,7 @@ const ICONS = {
   "Friedhof (Trinkwasser)": "🪦", "Toilette": "🚻", "Verkaufsautomat": "🥤",
   "Checkpoint": "📍", "Unterkunft": "🛏️",
 };
-const FILTER_SETS = { essen: ESSEN_TYPEN, laeden: LAEDEN_TYPEN, wasser: WASSER_TYPEN, schlafen: SCHLAF_TYPEN };
+const FILTER_SETS = { essen: ESSEN_TYPEN, laeden: LAEDEN_TYPEN, wasser: WASSER_TYPEN };
 
 const state = {
   tour: null,
@@ -43,7 +43,9 @@ const state = {
   planStunden: 10,         // geplante Stunden unterwegs (inkl. Stehzeit)
   tage: [],                // abgeschlossene Tourtage {d, endKm, stunden, tempo, steh}
   filter: "alles",
+  tab: "versorgung",       // versorgung | betten (Betten: 1x am Tag, eigener Tab)
   horizontKm: 50,
+  horizontBettenKm: 100,
   wakeLock: null,
 };
 
@@ -58,6 +60,7 @@ function speichern() {
       km: state.km,
       speedMode: state.speedMode, manualKmh: state.manualKmh, filter: state.filter,
       stehMin: state.stehMin, ermuedung: state.ermuedung, planStunden: state.planStunden,
+      tab: state.tab,
     }));
     localStorage.setItem("versorgung-tage", JSON.stringify(state.tage));
   } catch { /* Speicher voll o. ä. — nicht kritisch */ }
@@ -74,7 +77,9 @@ function laden() {
     if (["manuell", "konservativ"].includes(s.speedMode)) state.speedMode = s.speedMode;
     else if (s.speedMode === "auto") state.speedMode = "manuell"; // Migration alter Stände
     if (Number.isFinite(s.manualKmh)) state.manualKmh = Math.min(45, Math.max(5, s.manualKmh));
-    if (["alles", "essen", "laeden", "wasser", "schlafen"].includes(s.filter)) state.filter = s.filter;
+    if (["alles", "essen", "laeden", "wasser"].includes(s.filter)) state.filter = s.filter;
+    else if (s.filter === "schlafen") { state.filter = "alles"; state.tab = "betten"; } // Migration
+    if (s.tab === "versorgung" || s.tab === "betten") state.tab = s.tab;
     if (Number.isFinite(s.stehMin)) state.stehMin = Math.min(30, Math.max(0, s.stehMin));
     if (Number.isFinite(s.ermuedung)) state.ermuedung = Math.min(20, Math.max(0, s.ermuedung));
     if (Number.isFinite(s.planStunden)) state.planStunden = Math.min(18, Math.max(2, s.planStunden));
@@ -232,11 +237,21 @@ function render() {
     </div>`;
   }
 
-  // POI-Liste
+  // Tab-Sichtbarkeit: Betten-Ansicht blendet das Versorgungs-Cockpit aus
+  const betten = state.tab === "betten";
+  for (const id of ["warn", "dayend", "plan-btn", "filters", "climb-info"]) {
+    $(id).hidden = betten;
+  }
+  document.querySelectorAll("#tabs .tab").forEach((b) =>
+    b.classList.toggle("active", b.dataset.tab === state.tab));
+
+  // POI-Liste (Versorgung) bzw. Unterkünfte (Betten-Tab)
   const set = FILTER_SETS[state.filter];
+  const horizont = betten ? state.horizontBettenKm : state.horizontKm;
   const voraus = t.pois.filter((p) =>
-    p.km > state.km - 0.3 && p.km <= state.km + state.horizontKm
-    && (!set || set.has(p.typ)));
+    p.km > state.km - 0.3 && p.km <= state.km + horizont
+    && (betten ? p.typ === "Unterkunft"
+      : p.typ !== "Unterkunft" && (!set || set.has(p.typ))));
   const eintraege = gruppiere(voraus).slice(0, 400);
   const rows = eintraege.map((e) => {
     if (e.gruppe) {
@@ -275,8 +290,8 @@ function render() {
     </button>`;
   });
   $("poi-list").innerHTML = rows.join("")
-    || `<div class="leer">Nichts in den nächsten ${nf0.format(state.horizontKm)} km.</div>`;
-  $("more-btn").textContent = `weiter voraus zeigen (${nf0.format(state.horizontKm)} → ${nf0.format(state.horizontKm + 50)} km)`;
+    || `<div class="leer">${betten ? "Keine Unterkünfte" : "Nichts"} in den nächsten ${nf0.format(horizont)} km.</div>`;
+  $("more-btn").textContent = `weiter voraus zeigen (${nf0.format(horizont)} → ${nf0.format(horizont + 50)} km)`;
 
   // Höhenmeter voraus
   const c = naechsterClimb(t.climbs, state.km);
@@ -700,7 +715,14 @@ async function boot() {
   $("plan-btn").addEventListener("click", zeigePlan);
   $("speed-btn").addEventListener("click", zeigeGeschwindigkeit);
   $("wake-btn").addEventListener("click", toggleWakeLock);
-  $("more-btn").addEventListener("click", () => { state.horizontKm += 50; render(); });
+  $("more-btn").addEventListener("click", () => {
+    if (state.tab === "betten") state.horizontBettenKm += 50;
+    else state.horizontKm += 50;
+    render();
+  });
+  document.querySelectorAll("#tabs .tab").forEach((b) => {
+    b.addEventListener("click", () => { state.tab = b.dataset.tab; speichern(); render(); });
+  });
   document.body.addEventListener("click", (e) => {
     if (e.target.closest("#gps-retry")) { startGps(); return; }
     const gruppe = e.target.closest(".gruppe-open");
